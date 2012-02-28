@@ -1,0 +1,59 @@
+#!/bin/bash
+
+
+# author: Jianing Yang <jianingy.yang@gmail.com>
+
+interval=5
+
+until [ -z "$1" ]; do
+    case "$1" in
+        -identity) shift && identity=$1 ;;
+        -port) shift && port=$1 ;;
+        -bind) shift && bind=$1 ;;
+        -interval) shift && interval=$1 ;;
+        *)
+            [ -z "$source" ] && source=$1 && shift
+            [ -z "$target" ] && target=$1 && shift
+        ;;
+    esac
+    shift
+done
+
+if [   -z "${target##*:}" -o -z "${target%%:*}" \
+    -o -z "${source##*:}" -o -z "${source%%:*}" ]
+then
+    cat <<EOH
+Usage: $0 [OPTIONS] source:source_port target:target_port
+make a tunnel for source via target:target_port
+OPTIONS:
+        -identity               identity file to use
+        -port                   ssh port of target
+        -bind                   bind address on target
+        -interval               port check interval
+        -verbose                show verbose information
+
+Report bugs to Jianing Yang <jianingy.yang@gmail.com>
+EOH
+    exit
+fi
+
+ssh_opt="-o ExitOnForwardFailure=yes"
+check_cmd="while nc -z localhost ${target##*:}; do sleep $interval; done"
+
+[ -n "$bind_address" ] && ssh_opt="$ssh_opt -b $bind_address"
+[ -n "$port" ] && ssh_opt="$ssh_opt -p $port"
+[ -n "$identity" ] && ssh_opt="$ssh_opt -i $identity"
+ssh_opt="$ssh_opt -R ${target##*:}:${source%%:*}:${source##*:}"
+
+while true
+do
+    if [ -n "$verbose" ]; then
+        echo -e "target:\r\t\t${target%%:*}"
+        echo -e "ssh_opt:\r\t\t$ssh_opt"
+        echo -e "check_cmd:\r\t\t$check_cmd"
+    fi
+    ssh $ssh_opt ${target%%:*} "$check_cmd"
+    sleep 3
+done
+
+# vim: ts=4 sw=4 et ai

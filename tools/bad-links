@@ -1,0 +1,38 @@
+#!/bin/bash
+
+# jianingy.yang@gmail.com 2009
+
+level=
+until [ -z "$1" ]; do
+	case "$1" in 
+		-l|--level)
+			shift
+			level=$1
+		;;
+		-h|--help)
+			echo "Usage: $0 command"
+			echo "Find bad symbol links and do something (the command)"
+			echo "Options:"
+			echo "    -l|--level     How many directory level you wanna search with"
+			echo
+			echo "Report bugs to jianingy.yang@gmail.com"
+		;;
+		--)
+			shift
+			command="$@"
+			break
+		;;
+		*)
+			command=(${command[@]} $1)
+		;;
+	esac
+	shift
+done
+
+[ -n "$level" ] && level="-maxdepth $level"
+[ -z "$command" ] && command=(ls -ld)
+command="${command[@]}"
+exec 3<&0 # copies STDIN, it prevents 'read' stealing STDIN from '$command'
+while read FN; do
+	test -e "$FN" || $command "$FN" <&3
+done < <(find . $level -type l)

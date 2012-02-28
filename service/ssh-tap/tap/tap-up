@@ -1,0 +1,12 @@
+#!/bin/bash
+#author: jianingy.yang@gmail.com
+
+error_log()
+{
+	echo >&2 "$@"
+}
+
+until ifconfig &>/dev/null tap$opt_local_tap; do sleep 1; done
+error_log "$ifenslave $opt_local_master tap$opt_local_tap"
+$ifenslave $opt_local_master tap$opt_local_tap
+exit 0

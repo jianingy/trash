@@ -1,0 +1,403 @@
+#!/usr/bin/env python2.6
+# -*- python -*-
+# emu - Extensible Management Utility
+# author: jianingy.yang AT gmail DOT com
+
+import signal, os, sys, pwd, grp, subprocess, errno
+import getopt, re, shlex, hashlib, urllib2, logging
+import ssl, socket, asyncore, asynchat, threading
+from cStringIO import StringIO
+
+# change the timout values as you wish
+_command_timeout = 300
+_socket_timeout = 5
+
+(CODE_OK, CODE_FAIL, CODE_COMMAND) = range(0, 3)
+_prefix = dict([(k, "") for k in ["cache", "tool", "server"]])
+
+class EnvironmentError(Exception): pass
+class ValidationError(Exception): pass
+class GenericError(Exception): pass
+
+def is_exec(x):
+    """If file exists and is executable"""
+    return os.path.exists(x) and os.access(x, os.X_OK)
+
+def make_tool_path(user, path):
+    return "%stools/%s/%s" % (_prefix["tool"], user, path.lstrip("/"))
+
+def make_cache_path(user, path):
+    return "%scache/%s/%s" % (_prefix["cache"], user, path.lstrip("/"))
+
+def make_server_path(user, path):
+    return "https://%s/~%s/%s" % (_prefix["server"], user, path.lstrip("/"))
+
+# accept, EINTR handled version
+def safe_accept(sock):
+    while True:
+        try:
+            return sock.accept()
+        except socket.error as e:
+            if e.errno == errno.EINTR:
+                continue
+            raise
+
+def send_message(code, message):
+    for row in message.split("\n"):
+        if not row: continue
+        print "%s-%s" % (code, row)
+
+def execute(args):
+    logging.debug("executing with %s" % str(args))
+    p = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, close_fds=True)
+    exit_code = p.wait()
+    return (exit_code, p.stdout.read(), p.stderr.read())
+
+def suexecute(args, uid=None, gid=None):
+    """execute command with suexec support"""
+    logging.debug("suexecuting with %s" % str(args))
+
+    # create pipes for stdout & stderr
+    (stdout_r, stdout_w) = os.pipe()
+    (stderr_r, stderr_w) = os.pipe()
+
+    # fork a new process for suexec
+    pid = os.fork()
+    if pid == 0:
+        ## BEGIN OF CHILD PROCESS
+
+        # change gid and uid if possible
+        if gid:
+            os.setgid(gid)
+        if uid:
+            os.setuid(uid)
+
+        # redirect stdout and stderr to pipes
+        stdin = open("/dev/null")
+        os.dup2(stdin.fileno(), sys.__stdin__.fileno())
+        os.dup2(stdout_w, sys.__stdout__.fileno())
+        os.dup2(stderr_w, sys.__stderr__.fileno())
+        stdin.close()
+
+        # close stdin and other unused fds
+        os.close(sys.__stdin__.fileno())
+        os.close(stdout_r)
+        os.close(stderr_r)
+        os.close(stdout_w)
+        os.close(stderr_w)
+
+        # exectue real command
+        os.execv(args[0], args)
+
+        # return 255 if execv failed
+        sys.exit(255)
+
+        ## END OF CHILD PROCESS
+
+    # close unused fds
+    os.close(stdout_w)
+    os.close(stderr_w)
+
+    # read from pipes
+    stdout = os.fdopen(stdout_r, "r").read()
+    stderr = os.fdopen(stderr_r, "r").read()
+
+    # wait for process to end up
+    (pid, exit_code) = os.waitpid(pid, 0)
+
+    return (exit_code, stdout, stderr)
+
+def download(user, passwd, path):
+    logging.debug("user_download `%s'@`%s'" % (user, path))
+
+# Create an Opener with support for Basic HTTP Authentication...
+    server = make_server_path(user, path)
+    password_mgr = urllib2.HTTPPasswordMgrWithDefaultRealm()
+    password_mgr.add_password(None, server, user, passwd)
+    auth_handler = urllib2.HTTPBasicAuthHandler(password_mgr)
+    auth_opener = urllib2.build_opener(auth_handler)
+
+# create directory
+    local = make_cache_path(user, path)
+    if not os.path.isdir(os.path.dirname(local)):
+        os.makedirs(os.path.dirname(local))
+
+# download file
+    response = auth_opener.open(server)
+    text = response.read()
+    file(local, "w").write(text)
+
+    return local
+
+def gnupg_verify(user, src, asc):
+    gpg = filter(is_exec, ["/usr/local/bin/gpg", "/usr/bin/gpg", "bin/gpg"])
+    if not gpg:
+        raise EnvironmentError("gpg is not available")
+    (exit_code, stdout, stderr) = execute([gpg[0], "--verify", asc, src])
+    logging.debug("verification result is %s" % (stderr))
+    return exit_code
+
+def install(euid, source, dest, user=None, group=None, mode=None):
+    pwnam = pwd.getpwnam(euid)
+
+    if os.path.exists(dest) and pwnam.pw_uid == 0:
+        stat = os.stat(dest)
+        (uid, gid) = (stat.st_uid, stat.st_gid)
+    else:
+        (uid, gid) = (pwnam.pw_uid, pwnam.pw_gid)
+
+    if mode:
+        os.chmod(source, mode)
+    if user and pwnam.pw_uid == 0:
+        uid = pwd.getpwnam(user).pw_uid
+    if group and pwnam.pw_uid == 0:
+        gid = grp.getgrnam(group).gr_gid
+    os.chown(source, uid, gid)
+
+    if not os.path.isdir(os.path.dirname(dest)):
+        os.makedirs(os.path.dirname(dest))
+    command = ["/bin/mv", source, dest]
+    (exit_code, stdout, stderr) = execute(command)
+    if not exit_code == 0:
+        send_message(CODE_FAIL, "installed file failed")
+
+def refresh(user, passwd, path, dest, uid, gid, mode, force=False):
+    asc = download(user, passwd, path + ".asc")
+    if not gnupg_verify(user, dest, asc) == 0 or force:
+        logging.debug("gnupg_verify failed for `%s' with `%s'" % (dest, asc))
+        local = download(user, passwd, path)
+        cache = make_cache_path(user, path)
+        install(user, cache, dest, uid, gid, mode)
+
+def command_run(user, passwd, path, extra=list()):
+    logging.info("command_run `%s'@`%s' with `%s'" % (user, path, extra))
+    asc = make_cache_path(user, path) + ".asc"
+    dst = make_tool_path(user, path)
+    refresh(user, passwd, path, dst, None, None, 0755)
+    args = [dst]
+    if extra:
+        args.extend(extra)
+    if gnupg_verify(user, dst, asc) == 0:
+        pwnam = pwd.getpwnam(user)
+        (exit_code, stdout, stderr) = suexecute(args, pwnam.pw_uid, pwnam.pw_gid)
+        send_message(CODE_OK, stdout)
+    else:
+        send_message(CODE_FAIL, "File `%s' can not be verified." % path)
+
+def command_refresh(user, passwd, path, dst,
+                    uid=None, gid=None, mode=None, force=False):
+    if mode:
+        mode = int(mode, 8)
+        strmode = "%04o" % mode
+    else:
+        strmode = None
+    logging.info(
+        "command_refresh `%s'@`%s' -> `%s' uid=%s gid=%s mode=%s force=%s" % 
+        (user, path, dst, str(uid), str(gid), strmode, str(force)))
+    asc = make_cache_path(user, path) + ".asc"
+    refresh(user, passwd, path, dst, uid, gid, mode, force)
+    if gnupg_verify(user, dst, asc) == 0:
+        send_message(CODE_OK, "succeeded")
+    else:
+        send_message(CODE_FAIL, "failed")
+
+def command_verify(user, path, dst):
+    logging.info("command_verify `%s' with `%s'" % (path, dst))
+    asc = make_cache_path(user, path) + ".asc"
+    # find the gpg
+    gpg = filter(is_exec, ["/usr/local/bin/gpg", "/usr/bin/gpg", "bin/gpg"])
+    if not gpg:
+        raise EnvironmentError("gpg is not available")
+    # do the verify
+    (exit_code, stdout, stderr) = execute([gpg[0], "--verify", asc, dst])
+    response = stderr.split("\n")
+    # get the result
+    if len(response) > 2 and exit_code == 0:
+        send_message(CODE_OK, response[-2])
+    else:
+        send_message(CODE_FAIL, response[-2])
+
+def interpret_command(text):
+    matched = re.match("^(?P<server>@\S+ )?(?P<action>\w+) (?P<user>\w+) (?P<passwd>\S+) (?P<args>.+)",text)
+
+    if not matched:
+        send_message(CODE_COMMAND, "invalid command")
+        return False
+
+    cmd = matched.groupdict()
+    argv = shlex.split(cmd["args"])
+    argc = len(argv)
+    if cmd["action"] == "verify" and argc > 1:
+        command_verify(cmd["user"], argv[0], argv[1])
+    elif cmd["action"] == "refresh":
+        opts, args = getopt.getopt(argv, "fg:u:m:")
+        opts = dict(opts)
+        for k in "gum": # chew it if you want!
+            if not "-" + k in opts:
+                opts["-" + k] = None
+        if len(args) > 1:
+            command_refresh(cmd["user"], cmd["passwd"], args[0], args[1],
+                            opts["-u"], opts["-g"], opts["-m"], "-f" in opts)
+    elif cmd["action"] == "run" and argc > 0:
+        command_run(cmd["user"], cmd["passwd"], argv[0], argv[1:])
+    else:
+        send_message(CODE_COMMAND, "unknown action")
+
+def bootstrap():
+    global _prefix
+    opts, args = getopt.getopt(sys.argv[1:], "",
+                               ["cache=", "tools=", "server=", "log=",
+                                "log-level=", "daemon", "listen=", "pid="])
+    logfile = sys.stderr
+    level = logging.INFO
+    debuglevel = {
+        "info": logging.INFO,
+        "debug": logging.DEBUG,
+    }
+    for o, a in opts:
+        if o == "--cache": _prefix["cache"] = a.rstrip("/") + "/"
+        elif o == "--tools": _prefix["tool"] = a.rstrip("/") + "/"
+        elif o == "--server": _prefix["server"] = a .rstrip("/")
+        elif o == "--log": logfile = file(a, "a+")
+        elif o == "--log-level": level = debuglevel[a]
+        elif o == "--listen": _prefix["listen"] = a
+        elif o == "--daemon": _prefix["daemon"] = True
+        elif o == "--pid": _prefix["pid"] = a
+    if not _prefix["server"]:
+        raise GenericError("please specifiy a server using --server")
+
+    os.chdir(os.path.abspath(os.path.dirname(sys.argv[0])))
+
+    if "daemon" in _prefix and logfile == sys.stderr:
+        raise GenericError("--daemon must be used with --log")
+
+    logging.basicConfig(stream=logfile,
+                        level=level,
+                        format="[%(asctime)s] [%(levelname)s] %(funcName)s: %(message)s")
+
+def start_stdout():
+    try:
+        raw_input = sys.stdin.readline()
+        while raw_input:
+            input = raw_input.strip()
+            if input:
+                signal.signal(signal.SIGALRM, timeout)
+                signal.alarm_(command_timeout)
+                interpret_command(input)
+                raw_input = sys.stdin.readline()
+    except Exception as e:
+        logging.warn(str(e))
+
+def timeout(signum, frame):
+    if signum != signal.SIGALRM:
+        return
+    raise GenericError("operation timeout")
+
+def accept_client(sock, addr):
+    block = sock.read()
+    while block:
+        mark = block.find("\n")
+        while mark > -1:
+            (command, block) = block.split("\n", 1)
+            logging.info("incoming command `%s'" % command)
+            if command:
+                sys.stdout = sock # redirect stdout
+                interpret_command(command) # run command
+                sys.stdout = sys.__stdout__ # restore stdout
+            else:
+                return False
+            mark = block.find("\n")
+        block = block + sock.read()
+    return True
+
+def revoke_children(signum, frame):
+    if signum == signal.SIGCHLD:
+        (pid, exit_code) = os.waitpid(-1, 0)
+        try:
+            while True:
+                logging.debug("child %s exited with code %s" % (pid, exit_code))
+                (pid, exit_code) = os.waitpid(-1, 0)
+        except:
+            return
+
+def start_standalone_server():
+    if _prefix["listen"].find(":") > 0:
+        (addr, port) = _prefix["listen"].split(":", 1)
+    else:
+        (addr, port) = (_prefix["listen"], 12345)
+    logging.info("starting server at %s:%s" % (str(addr), str(port)))
+    signal.signal(signal.SIGCHLD, revoke_children)
+    # setup socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((addr, int(port)))
+    sock.listen(1024)
+    while sock:
+        # use safe_accept here since we may frequently interrupted
+        # by SIGCHLD
+        client, addr = safe_accept(sock)
+        pid = os.fork()
+        if pid == 0:
+            ## BEGIN OF CHILD PROCES
+            logging.debug("child %s started for incoming connection" % os.getpid())
+            try:
+                # wrap with ssl
+                ssl_sock = ssl.wrap_socket(client,
+                                           server_side=True,
+                                           certfile="emu-daemon.pem",
+                                           ssl_version=ssl.PROTOCOL_SSLv23)
+                # setup timeout
+                ssl_sock.settimeout(_socket_timeout)
+                signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+                signal.signal(signal.SIGALRM, timeout)
+                signal.alarm(_command_timeout)
+                # serve client
+                accept_client(ssl_sock, addr)
+                # clear timeout
+                signal.alarm(0)
+                # clean up
+                ssl_sock.close()
+            except Exception as e:
+                # talk about tragedy
+                logging.warn(str(e))
+            # exit
+            sys.exit(0)
+            ## END OF CHILD PROCESS
+        elif pid < 0:
+            logging.warn("can not fork new process for accepted connection.")
+        # close client fd in parent process
+        client.close()
+
+def daemonize():
+    pid = os.fork()
+    if pid == 0:
+        os.setsid()
+        pid = os.fork()
+        if pid == 0:
+            os.chdir(os.path.dirname(sys.argv[0]))
+            logging.debug("change directory to %s" % str(os.getcwd()))
+            file(_prefix["pid"], "w").write(str(os.getpid()))
+            logging.debug("server pid = %s" % str(os.getpid()))
+            os.umask(022)
+            stdin = file("/dev/null", "r")
+            stdout = file("/dev/null", "w")
+            os.dup2(stdin.fileno(), 0)
+            os.dup2(stdout.fileno(), 1)
+            os.dup2(stdout.fileno(), 2)
+            stdin.close()
+            stdout.close()
+        else:
+            os._exit(0)
+    else:
+        os._exit(0)
+
+if __name__ == "__main__":
+    bootstrap()
+    if "listen" in _prefix:
+        if "daemon" in _prefix:
+            daemonize()
+        start_standalone_server()
+        sys.exit(0)
+    else:
+        start_stdout()

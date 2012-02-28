@@ -1,0 +1,12 @@
+#!/bin/sh
+root=$(dirname $(readlink -f $0))
+basename=$(basename $root)
+IFS="-"
+set $basename
+server=$2:$3
+remote_tap=$4
+local_tap=$5
+remote_master="bond$(( $remote_tap / 100 ))"
+local_master="bond$(( $local_tap / 100 ))"
+exec 2>&1
+exec ./tap/tap-connect --local-master $local_master --remote-master $remote_master --remote-tap $remote_tap --local-tap $local_tap --server $server

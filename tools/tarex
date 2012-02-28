@@ -1,0 +1,83 @@
+#!/bin/bash
+# author: jianingy.yang@gmail.com, 2009
+
+EXTRACTORS=(".tar.gz::tar zxvf" ".tar.bz2::tar jxvf" ".tar::tar xvf")
+DLAGENTS=("http::wget -c -qO -" "ftp::wget -c -qO -" "https::wget -c -qO -" "scp::scp_extract")
+
+scp_extract()
+{
+#sample: scp://192.168.1.8:9999/~jianingy/file.conf
+	uri=$1
+	proto=${uri%%://*}
+	rest=${uri:$(expr ${#proto} + 3)}
+	hostexpr=${rest%%/*}
+	hostname=${hostexpr%%:*}
+	port=22
+	[ "${#hostname}" != "${#hostexpr}" ] && port=${hostexpr##*:}
+	path=${rest#*/}
+	ssh -p $port $hostname "cat $path"
+}
+
+find_extract_command()
+{
+# find an extraction command
+	local uri=$1
+	for method in "${EXTRACTORS[@]}"; do
+		ext=${method%%::*}
+		# suffix matching
+		if [ "$ext" == "${uri:$(expr -${#ext})}" ]; then
+			retval="${method##*::}"
+			return
+		fi
+	done
+	if [ -z "$extract_command" ]; then
+		echo "$0: Unknow extension" >&2
+		exit 1
+	fi
+}
+
+find_download_command()
+{
+# find a downloader
+	local uri=$1
+	for method in "${DLAGENTS[@]}"; do
+		proto=${uri%%://*}
+		if [ "${method%%::*}" == "$proto" ]; then
+			retval="${method##*::}"
+			return
+		fi	
+	done
+	if [ -n "$proto" ]; then
+		echo "$0: Unknow protocol" >&2
+		exit 1
+	fi
+}
+
+# check if uri is empty
+if [ -z "$1" ]; then
+	echo "Usage: $0 URI"
+	echo "A tarball extraction wrapper"
+	echo
+	echo "Examples:"
+	echo "$ tarex http://blog.jianingy.com/all-backups-20090207.tar.gz"
+	echo "$ tarex ftp://blog.jianingy.com/all-backups-20090207.tar.bz2"
+	echo "$ tarex scp://blog.jianingy.com/~jianingy/backup/all-backups-20090207.tar.gz"
+	echo
+	echo "Report bugs to jianingy.yang@gmail.com"
+	exit 1
+fi
+
+until [ -z "$1" ]; do
+	uri=$1
+	find_download_command "$uri"
+	download_command=$retval
+	find_extract_command "$uri"
+	extract_command=$retval
+
+	if [ -n "$download_command" ]; then
+		$download_command "$uri" | $extract_command -
+	else
+		$extract_command "$uri"
+	fi
+	shift
+done

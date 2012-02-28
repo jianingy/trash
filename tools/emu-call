@@ -1,0 +1,156 @@
+#!/usr/bin/env python
+from twisted.internet import epollreactor
+epollreactor.install()
+import sys
+import logging
+import getopt
+import getpass
+from OpenSSL import SSL
+from twisted.internet import reactor
+from twisted.internet import ssl, reactor
+from twisted.internet.protocol import ClientFactory, Protocol, ClientCreator
+
+class CtxFactory(ssl.ClientContextFactory):
+
+    def getContext(self):
+        self.method = SSL.SSLv23_METHOD
+        ctx = ssl.ClientContextFactory.getContext(self)
+        return ctx
+
+class CommandProtocol(Protocol):
+
+    def connectionMade(self):
+        logging.debug("connection made to %s" %
+                      self.transport.connector.getDestination())
+        self.sendMessage(self.factory.command)
+
+    def sendMessage(self, msg):
+        logging.debug("sending command `%s'" % msg.strip())
+        self.transport.write(msg + "\n\n")
+
+    def dataReceived(self, data):
+        dest = self.transport.connector.getDestination()
+        dest = (dest.host, dest.port)
+        self.factory.data[dest] = data
+        self.transport.loseConnection()
+
+class CommandClientFactory(ClientFactory):
+
+    protocol = CommandProtocol
+
+    def __init__(self, command, options):
+        self.connection = 0
+        self.command = command
+        self.retries = dict()
+        self.data = dict()
+        self.waiting = list()
+        self.connection = dict()
+        self.options = options
+
+    def clientConnectionTimeout(self, connector, reason):
+        dest = connector.getDestination()
+        dest = (dest.host, dest.port)
+        if not dest in self.data:
+            self.data[dest] = "255-timed out"
+            if connector.transport:
+                connector.transport.loseConnection()
+            self.clientConnectionLost(connector, None)
+
+    def startedConnecting(self, connector):
+        dest = connector.getDestination()
+        dest = (dest.host, dest.port)
+        self.connection[dest] = True
+        if "timeout" in self.options and self.options["timeout"]:
+            reactor.callLater(self.options["timeout"],
+                              self.clientConnectionTimeout, connector, None)
+
+    def clientConnectionFailed(self, connector, reason):
+        return
+
+    def clientConnectionLost(self, connector, reason):
+        dest = connector.getDestination()
+        dest = (dest.host, dest.port)
+
+        if not dest in self.connection:
+            return
+
+        del self.connection[dest]
+
+        if len(self.connection) < self.options["max_client"] and self.waiting:
+            self.connect(self.waiting.pop())
+
+        if dest in self.data:
+            self.printData(dest)
+            del self.data[dest]
+        else:
+            if dest in self.retries:
+                self.retries[dest] = self.retries[dest] + 1
+            else:
+                self.retries[dest] = 1
+            if self.retries[dest] < 3:
+                logging.debug("recoonect to %s (%d times retried)" %
+                              (dest, self.retries[dest]))
+                self.postpone(dest)
+
+        if not self.connection and not self.waiting:
+            reactor.stop()
+
+    def printData(self, dest):
+        (exit_code, response) = self.data[dest].split("-", 1)
+        print "%s/%s: %s" % (dest[0], exit_code, response)
+
+    def connect(self, client):
+        (hostname, port) = client
+        reactor.connectSSL(hostname, port, self,CtxFactory())
+
+    def postpone(self, client):
+        self.waiting.append(client)
+
+    def run(self, clients):
+        for i, client in enumerate(clients):
+            if i < self.options["max_client"]:
+                self.connect((client, self.options["port"]))
+            else:
+                self.postpone((client, self.options["port"]))
+        reactor.run()
+
+def connect(host, port, factory):
+    reactor.connectSSL(host, port, factory, CtxFactory())
+
+def multi_execute(hosts, command, *args, **kargs):
+    factory = CommandClientFactory(command, kargs)
+    factory.run(hosts)
+
+def main():
+    opts, args = getopt.getopt(sys.argv[1:], "h:p:u:m:",
+                               ["host=", "port=", "user=", "max=", "timeout=",
+                                "debug", "verbose" ])
+    hosts = None
+    port = 12345
+    user = "nobody"
+    level=logging.WARN
+    max_client = 20
+    timeout = None
+    for o, a in opts:
+        if o in ["-h", "--host"]: hosts = a.split(",")
+        elif o in ["-p", "--port"]: port = a
+        elif o in ["-u", "--user"]: user = a
+        elif o in ["-m", "--max"]: max_client = a
+        elif o == "--timeout": timeout = float(a)
+        elif o == "--debug": level=logging.DEBUG
+        elif o == "--verbose": level=logging.INFO
+
+    logging.basicConfig(stream=sys.stderr,
+                        level=level,
+                        format="[%(asctime)s] [%(levelname)s] %(funcName)s: %(message)s")
+
+    if args and hosts:
+        passwd = getpass.getpass("Password for user %s: " % user)
+        command = "run %s %s %s" % (user, passwd, " ".join(args))
+        multi_execute(hosts, command, port=port, max_client=max_client, timeout=timeout)
+    else:
+        print "usage: %s -h host,host,... command [args...]" % sys.argv[0]
+        sys.exit(0)
+
+if __name__ == "__main__":
+    main()

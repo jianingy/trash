@@ -1,0 +1,55 @@
+#!/usr/bin/env perl
+# author: jianingy.yang (AT) gmail (DOT) com
+
+use strict;
+use warnings;
+
+use FindBin;
+use lib "$FindBin::Bin/../lib";
+use Getopt::Long;
+
+my $opt_help;
+my $result = GetOptions(
+        "h|help"     => \$opt_help,
+);
+
+if ($opt_help || @ARGV == 0) {
+  print STDERR "Usage: megazap PID1, PID2, ...\n";
+  print STDERR "Stop all process PID and all its children by first sending a SIGTERM and then SIGKILL\n";
+  print STDERR "\n";
+  exit 0;
+}
+
+my %hash;
+my %matches;
+my $pid;
+
+$matches{$_} = 1 foreach(@ARGV);
+foreach my $base (glob "/proc/*") {
+  chomp $base;
+  $base =~ s/^\s+|\s+$//g;
+  if ($base =~ m{/proc/(\d+)} && -r "$base/stat") {
+	  $pid = $1;
+	  open STAT, '<', "$base/stat";
+      my $stat = <STAT>;
+	  my (undef, $command, undef, $ppid, undef) = split (/\s+/, $stat, 5);
+	  $hash{$pid} = $command if exists $hash{$ppid} || exists $matches{$pid};
+  }
+}
+my $sleep;
+foreach (keys %hash) {
+  next unless -d "/proc/$_";
+  print STDERR "INFO: \tSending TERM to [$_] $hash{$_}\n";
+  kill 15, $_;
+  $sleep = 1;
+}
+
+sleep 3 if $sleep;
+
+foreach (keys %hash) {
+  next unless -d "/proc/$_";
+  print STDERR "INFO: \tSending KILL to [$_] $hash{$_}\n";
+  kill 9, $_;
+}
+
+exit 0;

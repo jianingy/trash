@@ -1,0 +1,42 @@
+#!/usr/bin/env perl
+# author: jianingy.yang@gmail.com
+
+use strict;
+use warnings;
+
+my $expr = $ARGV[0];
+
+unless ($expr) {
+	print STDERR "Usage: $0 CIDR\n";
+	print STDERR "Example: \n";
+	print STDERR "    $0 192.168.16.0/24 \n";
+	print STDERR "    $0 192.168.16.0/23 \n";
+	print STDERR "\n";
+	exit 0;
+}
+
+my ($ip, $cidr) = split /\//, $expr;
+my @decimals = split /\./, $ip;
+
+die "Please use a CIDR format IP address"
+	unless @decimals == 4 && defined($cidr) && $cidr > -1 && $cidr < 33;
+
+my $addr = 0;
+my $num_nodes = 2 ** (32 - $cidr);
+foreach(@decimals) {
+	$addr <<= 8;
+	$addr |= $_;
+}
+
+my $base_addr = $addr & (4294967295 << (32 - $cidr));
+my $brd_addr = $addr | (4294967295 >> $cidr);
+
+for ($addr = $base_addr; $addr <= $brd_addr; $addr++) {
+	my @disp;
+	my $tmp_addr = $addr;
+	while (@disp < 4) {
+		unshift @disp, $tmp_addr & 0xFF;
+		$tmp_addr >>= 8;
+	}
+	print join(".", @disp)."\n";
+}

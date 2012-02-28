@@ -1,0 +1,442 @@
+#!/bin/bash
+
+################################################################################
+#
+# META PACKAGE
+# A tool for making packages of various linux distribution.
+#
+# VERSION: 1.2
+#
+# AUTHOR: jianingy <detrox@gmail.com>, June 2008
+#
+# DESCRIPTION:
+#      The idea of metapkg comes from a same name tool in Yahoo Inc. Because it
+#      was written in Ruby, I did not read the source. Instead, I took the idea
+#      and wrote this script in the style of ArchLinux's makepkg (Actually I am
+#      an ArchLinux Fans).
+#
+# DETAIL DESCRIPTION: http://www.jianingy.com/metapkg.html
+#
+# THIS PROGRAM IS PUBLISHED UNDER BSD LICENSE.
+#
+# CHANGELOG:
+#         2008-12-16  |    Support for svn+http protocol
+#         2008-07-07  |    Support for building self install pacakge on FreeBSD
+#         2008-07-04  |    Added support for self installer
+#         2008-07-02  |    Added file:// proto, Supported prebuild function
+#
+#
+# TODO:
+#      more DLAGENTS
+#
+
+################################################################################
+# GLOBALS
+################################################################################
+
+DLAGENTS=('http::wget -c' 'file::_handler' 'svn+http::_handler')
+EXTRACTORS=('.tar.bz2::tar jxvf' '.tar.gz::tar zxvf' '.tar::tar xvf')
+INTEGRITY_CHECKERS=('md5sum' 'md5 -q')
+UTILS=('find' 'sed' 'tr' 'cp')
+
+################################################################################
+# ROUTINES
+################################################################################
+banner()
+{
+	local message=$1
+	local prefix="\033[1m\033[33m"
+	local suffix="\033[0m"
+	local premsg="\033[1m\033[32m"
+	echo -e "$prefix>>$premsg $message $suffix"
+}
+
+error_log()
+{
+	local level=$(echo "$1" | tr [:lower:] [:upper:])
+	local message=$2
+	local prefix="\033[1m\033[33m"
+	local suffix="\033[0m"
+	case "$level" in
+		ERROR) level="\033[31m$level" ;;
+		INFO) level="\033[32m$level" ;;
+	esac
+	echo -e "$prefix>> $level $message $suffix"
+}
+
+_handler()
+{
+	local proto="${item%%://*}"
+	local path="${item##*://}"
+	case "$proto" in
+		file)
+			banner "cp $path $startdir"
+			cp $path $startdir || error_exit 1
+		;;
+		svn+http)
+			which svn &>/dev/null || error_exit 1 "can not find utility svn"
+			banner "Checkout from subversion respository"
+			banner "svn co http://$path $startdir/src/$pkgver"
+			svn co http://$path $startdir/src/$pkgver
+		;;
+	esac
+}
+
+error_exit()
+{
+	error_log "ERROR" "$2"
+	exit $1
+}
+
+check_self_depends()
+{
+	local util
+	for util in "${UTILS[@]}"; do
+		which $util &>/dev/null || error_exit 1 "can not find utility $util"
+	done 
+}
+
+make_depends_str()
+{
+	local pattern="$1"; shift
+	local sep=""
+	local str=""
+	for item in $@; do
+		[ -n "$str" ] && sep=","
+		str="$str$(printf "$sep$pattern" $(echo "$item" | sed -e 's/\(<\|>\|>=\|<=\|<<\|>>\)/ \1 /g'))"
+	done
+	echo $str
+}
+
+get_downloadclient()
+{
+	local uri=$1
+	local proto=${uri%%://*}
+	local item
+
+	for item in "${DLAGENTS[@]}"; do
+		if [ "${item%%::*}" == "$proto" ]; then
+			echo ${item##*::}
+			return
+		fi	
+	done
+
+	error_exit 1 "can not find download client for uri schema $proto"
+}
+
+check_integrity()
+{
+	local file=$1
+	local md5sum=$2
+	local origin=""
+	for checker in "${INTEGRITY_CHECKERS[@]}"; do
+		origin=$($checker $file 2>/dev/null)
+		[ -n "$origin" ] && break
+	done
+
+	[ -z "$origin" ] && error_exit 1 "can not calculate md5sum"
+
+	[ "${origin%% *}" == "$md5sum" ] && return 0
+	error_exit 1 "Integrity check failed on $file ($origin != $md5sum)"
+}
+
+extract_source()
+{
+	local file=$1
+	local item
+	mkdir -p $startdir/src &>/dev/null
+	pushd $startdir/src &>/dev/null || error_exit "can not change directory to $startdir/src"
+	for item in "${EXTRACTORS[@]}"; do
+		local ext=${item%%::*}
+		local extractor=${item##*::}
+		# suffix matching
+		if [ "$ext" == "${file:$(expr -${#ext})}" ]; then
+			eval "$extractor $file" &>/dev/null
+		fi
+	done
+	popd &>/dev/null 
+}
+
+prepare_sources()
+{
+	local item
+	local order=0
+	banner "Starting to download sources"
+	for item in "${source[@]}"; do
+		local agent=$(get_downloadclient $item)
+		local file=${item##*/}
+		local proto="${item%%://*}"
+		local path="${item##*://}"
+		[ ! -f $file ] && eval "$agent $item"
+		if [ "${proto:0:3}" != "svn" ]; then
+			check_integrity "$file" ${md5sum[$order]}
+			extract_source "$startdir/$file"
+		fi
+		((order++))
+	done
+}
+
+prebuild() 
+{
+	true
+}
+
+start_prebuild()
+{
+	banner "Preparing Building"
+	prebuild || error_exit 2 "prebuild failed"
+}
+
+start_build()
+{
+	banner "Starting to build source"
+	build || error_exit 2 "build failed"
+}
+
+make_debian()
+{
+	banner "Making DEB pacakge"
+	local debdir=$startdir/build/DEBIAN
+	mkdir -p $debdir &>/dev/null
+	# Open File using fd 3
+	exec 3>$debdir/control || error_exit 1 "can not write to $debdir/control"
+	echo "Package: $pkgname" >&3
+	echo "Version: $pkgver" >&3
+	echo "Description: $brief" >&3
+	echo "Maintainer: $maintainer" >&3
+	echo "Architecture: $arch" >&3
+	[ -n "$depends" ]  && echo Depends: $(make_depends_str "%s(%s%s)" "${depends[@]}") >&3
+	[ -n "$postinst" ] && (cp -a $startdir/$postinst $debdir || 
+		error_exit 1 "can not read postinst ($postinst)")
+	[ -n "$prerm" ] && (cp -a $startdir/$prerm $debdir || 
+		error_exit 1 "can not read prerm ($prerm)")
+	# Close fd 3
+	exec 3>&-
+	dpkg -b $startdir/build $startdir/$pkgname-$pkgver.deb || error_exit 1 "dpkg returns non-zero."
+}
+
+make_redhat()
+{
+	banner "Making RPM pacakge"
+	mkdir -p $startdir/build/{rpmbuild,rpmtop,rpmtemp,rpmbuild/$arch} ||
+		error_exit 1 "can not create rpmbuild directories"
+	exec 3>$startdir/build/spec || error_exit 1 "can not write to $startdir/build/spec"
+	echo "%define _rpmdir $startdir/build/rpmbuild" >&3
+	echo "%define _topdir $startdir/build/rpmtop" >&3
+	echo "%define _tmppath $startdir/build/rpmtemp" >&3
+
+	echo "Name: $pkgname" >&3
+	echo "Version: $pkgver" >&3
+	echo "Buildroot: $destdir" >&3
+	echo "Release: $pkgrel" >&3
+	echo "Summary: $brief" >&3
+	echo "License: $license" >&3
+	echo "Group: $group" >&3
+	[ -n "$depends" ]  && echo Requires: $(make_depends_str "%s%s%s" "${depends[@]}") >&3
+	echo "%description" >&3
+	echo "$description" >&3
+	if [ -n "$postinst" ]; then
+		echo "%post" >&3
+		cat $startdir/$postinst >&3
+	fi
+	if [ -n "$prerm" ]; then
+		echo "%preun" >&3
+		cat $startdir/$prerm >&3
+	fi
+	# import files
+	echo "%files" >&3
+	[ -n "$defattr" ]  && echo "%defattr ($defattr)" >&3
+	pushd $destdir &>/dev/null
+	find . -type f -or -type l | sed -e 's|^\./|/|g' >&3
+	exec 3>&-
+	popd
+	rpmbuild -bb $startdir/build/spec && 
+		mv -v $startdir/build/rpmbuild/$arch/*.rpm $startdir/
+}
+
+make_slackware()
+{
+	banner "Making Slackware pacakge"
+	mkdir -p $startdir/build/install ||
+		error_exit 1 "can not create directory $startdir/build/install"
+	exec 3>$startdir/build/install/slack-desc || 
+		error_exit 1 "can not write to $startdir/build/install/slack-desc"
+	local width=76
+	local space_width=$(expr $width - ${#pkgname} - 2)
+	echo "$pkgname: $pkgname $pkgver" >&3
+	echo "$pkgname: " >&3
+	echo "$description" | sed -n -e 'H' -e 'g' -e 's/\n//g' -e "s/\([^\n]\{$space_width\}\)/\1\n/g" -e '$p' | sed -e 's/\([^ ]\)$/\1-/g' -e "s/^/$pkgname: /g" | head -11 >&3
+	local num_fill=$(expr 11 - $(cat $startdir/build/install/slack-desc | wc -l))
+	until [ $num_fill -eq 0 ]; do
+		echo "$pkgname: " >&3
+		((num_fill--))
+	done
+	pushd $startdir/build &>/dev/null
+	/sbin/makepkg -c n $startdir/$pkgname-$pkgver.tgz
+	popd &>/dev/null
+}
+
+make_selfinst()
+{
+	local inst="$startdir/$pkgname-$pkgver.inst"
+	exec 3>$inst
+	banner "Making SelfInst Package"
+	echo "#!/bin/bash" >&3	
+	echo "postinst()" >&3
+	echo "{" >&3
+	echo "true" >&3
+	if [ -n "$postinst" ]; then
+		cat $startdir/$postinst >&3
+	fi
+	echo "}" >&3
+	echo "prerm()" >&3
+	echo "{" >&3
+	echo "true" >&3
+	if [ -n "$prerm" ]; then
+		cat $startdir/$prerm >&3
+	fi
+	echo "}" >&3
+	cat<<'...' >&3
+DEPS=("tar" "sed" "xargs") 
+for dep in ${DEPS[@]}; do
+	which $dep &>/dev/null
+	if [ "x$?" != "x0" ]; then
+		echo "Dependency utility $dep not found"
+		exit 1
+	fi
+done
+until [ -z "$1" ]; do
+	case "$1" in
+		-i|-install|--install)
+			cat $0 | sed -e '1,/^__END__$/d' | gzip --quiet -cd | tar -C / -xf -
+			postinst
+			exit 0
+		;;
+		-r|-remove|--remove)
+			prerm
+			dirs=()
+			for file in $(cat $0 | sed -e '1,/^__END__$/d' | gzip --quiet -cd | tar tf -); do
+				file="/$file"
+				[ -d "$file" ] && dirs="$file $dirs"
+				[ -f "$file" ] && rm -v $file
+			done
+			for dir in ${dirs[@]}; do
+				dir="/$dir"
+				rmdir $dir &>/dev/null
+			done
+			exit 0
+		;;
+		-l|-list|--list)
+			cat $0 | sed -e '1,/^__END__$/d' | gzip --quiet -cd |tar tf -
+			exit 0
+		;;
+	esac
+	shift
+done
+echo "Usage: $0 [OPTIONS]"
+echo
+echo "OPTIONS:"
+echo "        -i|--install              install package"
+echo "        -r|--remove               remove package"
+echo "        -l|--list                 list files in the package"
+echo 
+exit 0
+__END__
+...
+	tar -zcf - -C$destdir . >&3
+	chmod +x $inst
+}
+
+makepkg()
+{
+	banner "Starting to make package"
+	case "$BUILD_TYPE" in
+		debian) make_debian ;;
+		redhat) make_redhat ;;
+		slackware) make_slackware ;;
+		selfinst) make_selfinst ;;
+		*) 
+			error_exit 1 "Unsupported package type $BUILD_TYPE"
+		;;
+	esac
+}
+
+check_package_tools()
+{
+	case "$BUILD_TYPE" in
+		redhat) 
+			which rpmbuild &>/dev/null || error_exit 1 "can not find utility rpmbuild"
+		;;
+		debian)
+			which dpkg &>/dev/null || error_exit 1 "can not find utility dpkg"
+		;;
+		slackware|selfinst) 
+		;;
+		*)
+			error_exit 1 "Unsupported build type $BUILD_TYPE"
+		;;
+	esac
+}
+
+usage()
+{
+	cat<<...
+Usage: $0 [OPTIONS...]
+A tool for making various distribution package
+
+OPTIONS:
+         -m|--make TYPE                distribution TYPE for making package
+                                       see "SUPPORTED TYPES" 
+         -c|--clean                    clean extracted source
+
+SUPPORTED TYPES:
+         redhat                        redhat's RPM package
+         debian                        debian's deb package
+         slackware                     slackware's .tgz package
+         selfinst                      self install tgz package
+
+Report bugs and help to improve via detrox@gmail.com
+...
+}
+
+################################################################################
+# MAIN
+################################################################################
+
+until [ -z "$1" ]; do
+	case "$1" in
+		-m|--make) 
+			ACTION="make" 
+			BUILD_TYPE=$2 
+		;;
+		-c|--clean)
+			ACTION="clean_src"
+		;;
+	esac
+	shift
+done
+
+check_self_depends
+startdir=$PWD
+source ./METABUILD &>/dev/null || error_exit 1 "can not find METABUILD"
+[ -f "./METABUILD.$BUILD_TYPE" ] && source ./METABUILD.$BUILD_TYPE
+case "$ACTION" in
+	make)
+		check_package_tools
+		prepare_sources
+		rm -rf $startdir/build &>/dev/null
+		destdir=$startdir/build/dest
+		mkdir -p $destdir &>/dev/null
+		start_prebuild || error_exit "prebuild failed"
+		start_build || error_exit "build failed"		
+		makepkg
+	;;
+	clean_src)
+		rm -rf $startdir/src
+	;;
+	*)
+		usage
+	;;
+esac
+
+# vim: set ts=4 ws=4 ai

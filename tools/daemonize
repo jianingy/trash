@@ -1,0 +1,71 @@
+#!/usr/bin/env perl
+#author: jianingy.yang@gmail.com
+
+use strict;
+use warnings;
+use FindBin;
+use POSIX qw(setsid);
+use Getopt::Long;
+
+sub main
+{
+    use vars '$opt_pid', '$opt_stdout', '$opt_stderr';
+
+    Getopt::Long::Configure("passthrough");
+
+    my $result = GetOptions(
+        "pid=s"        => \$opt_pid,
+        "stdout=s"     => \$opt_stdout,
+        "stderr=s"     => \$opt_stderr,
+    );
+
+    die "no pid file specified" unless $opt_pid;
+
+    my $opt_bash = (grep { -x } qw{/usr/local/bin/bash
+            /usr/bin/bash
+            /bin/bash
+            })[0] or die "bash not found";
+
+    my $pid = fork;
+    die "can not fork (1st)" if $pid < 0;
+
+# let's return to the soruce ...
+    chdir '/';
+
+# close all my openings
+    open STDIN, '<', '/dev/null';
+    open STDOUT, '>', '/dev/null';
+    open STDERR, '>', '/dev/null';
+
+    open STDOUT, '>', $opt_stdout
+      if $opt_stdout;
+    open STDERR, '>', $opt_stderr
+      if $opt_stderr;
+
+    if ($pid == 0) {
+
+        # become session leader
+        setsid;
+
+        $pid = fork;
+        die "can not fork (2nd)" if $pid < 0; # won't see anything :P
+
+        # give up session leader
+        if ($pid == 0) {
+            # remember pid
+            # NOTICE: the real program taks charge in removing the pid file
+            open PID, '>', $opt_pid;
+            print PID "$$";
+
+            # let's run the real program
+            exec(@ARGV);
+        }
+    }
+
+    return 0;
+}
+
+exit(&main);
+
+
+# vim: ts=4 sw=4 ai et

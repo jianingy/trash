@@ -1,0 +1,65 @@
+#!/usr/bin/env python
+
+
+from threading import Thread
+from optparse import OptionParser
+import sys
+import smtplib
+import time
+
+class mail_sender(Thread):
+    def __init__(self, id, options):
+        Thread.__init__(self)
+        self.id = id
+        self.options = options
+
+    def run(self):
+        options = self.options
+        msg = "From: %s\r\nTo:%s\r\nSubject: %s #%05d\r\n\r\n" % (
+              options.mail_from, options.mail_to, options.mail_tag, self.id)
+        msg += "This is a test message sent by jianing's smtp-load.\r\n\r\n"
+        msg += "Time: %s, %s" % (time.asctime(), time.time())
+        try:
+            server = smtplib.SMTP(options.smtp_host)
+            if options.smtp_username:
+                server.login(options.smtp_username, options.smtp_password)
+            server.set_debuglevel(0)
+            server.sendmail(options.mail_from, options.mail_to, msg)
+            server.quit()
+            print >>sys.stderr, "[%s] INFO : Message sent successfully. id = %d" % (time.asctime(), self.id)
+        except Exception as error:
+            print >>sys.stderr, "[%s] ERROR: %s." % (time.asctime(), error)
+
+
+
+def send(options):
+    threads = []
+    for i in range(0, options.num_group):
+        for j in range(0, options.num_concurrent):
+            thread = mail_sender(i * options.num_concurrent + j, options)
+            threads.append(thread)
+            thread.start()
+
+        while threads:
+            thread = threads.pop()
+            if thread.isAlive():
+                thread.join()
+        if options.interval:
+            time.sleep(options.interval)
+
+if __name__ == "__main__":
+    parser = OptionParser(description='Put loads on SMTP server. Report bugs to jianingy.yang@gmail.com', version='smtp-load 1.0')
+    parser.add_option("", "--host", dest="smtp_host", help="SMTP server hostname", default='localhost')
+    parser.add_option("", "--port", dest="smtp_port", help="SMTP server port", default=25, type='int')
+    parser.add_option("-u", "--username", dest="smtp_username", help="SMTP server username")
+    parser.add_option("-p", "--password", dest="smtp_password", help="SMTP server password")
+    parser.add_option("-f", "--from", dest="mail_from", help="Mail address for field 'From'", default='smtp-load@jianingy.com')
+    parser.add_option("-t", "--to", dest="mail_to", help="Mail address for field 'To'", default='smtp-test@jianingy.com')
+    parser.add_option("-T", "--tag", dest="mail_tag", help="User defined tag", default='TAG')
+    parser.add_option("-g", "--group", dest="num_group", help="Number of groups of mail to be sent", default=5, type='int')
+    parser.add_option("-c", "--concurrent", dest="num_concurrent", help="Number of mails of each group", default=5, type='int')
+    parser.add_option("-i", "--interval", dest="interval", help="Sending interval between two groups in second", default=0, type='float')
+    (options, args) = parser.parse_args()
+    send(options)
+
+# vim: ts=4 sw=4 ai et

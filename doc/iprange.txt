@@ -1,0 +1,75 @@
+#+TITLE:  A tool for compression and expansion ipv4 address
+#+AUTHOR: Jianing Yang 
+
+** Synopsis
+[[https://github.com/jianingy/iprange][iprange]] is tool for common ipv4 address operations like compression
+and expansion. It support CIDR, NETMASK and RANGE format as input and
+CIDR or NETMASK as output. For example, 
+
+** Examples
+
+*** Expansion
+
+#+begin_example
+	~ $ iprange -x 192.168.1.0/30
+	192.168.1.0
+	192.168.1.1
+	192.168.1.2
+	192.168.1.3
+
+	~/devel/iprange $ ./iprange -x 192.168.1.0/255.255.255.252
+	192.168.1.0
+	192.168.1.1
+	192.168.1.2
+	192.168.1.3
+
+	~/devel/iprange $ ./iprange -x 192.168.1.0-192.168.1.5
+	192.168.1.0
+	192.168.1.1
+	192.168.1.2
+	192.168.1.3
+	192.168.1.4
+	192.168.1.5
+#+end_example
+
+*** Compression
+#+begin_example
+	~/devel/iprange $ ./iprange -c 192.168.1.0 192.168.1.1 192.168.1.2 192.168.1.3 
+	192.168.1.0/30
+
+	~/devel/iprange $ ./iprange  -x 192.168.1.0/30 | grep -v 192.168.1.2 | ./iprange -c
+	192.168.1.0/31
+	192.168.1.3/32
+
+	~/devel/iprange $ ./iprange  -x 192.168.1.0/30 | grep -v 192.168.1.2 | ./iprange -c -t netmask
+	192.168.1.0/255.255.255.254
+	192.168.1.3/255.255.255.255
+#+end_example
+
+*** CIDR/NETMASK Conversion
+#+begin_example
+	~ $ iprange -t netmask -c  76.74.248.0/255.255.248.0
+	76.74.248.0/255.255.248.0
+
+	~ $ iprange -t cidr -c  72.233.0.0/255.255.128.0
+	72.233.0.0/17
+#+end_example
+
+** Usage
+
+#+begin_example
+	usage: iprange [OPTIONS] IP0 IP1 ...
+	compress / expand ipv4 addresses
+	OPTIONS: 
+		-h|--help                  help message
+		-c                         do compression
+		-x                         do expansion
+		-t netmask/cidr            output format
+
+	IP Address Syntax:
+	   * CIDR format    : 192.168.1.0/24; or
+	   * NETMASK format : 192.168.1.0/255.255.255.0; or
+	   * Range format   : 192.168.1.0-192.168.2.200
+
+	Bug report to jianingy dot yang at gmail dot com
+#+end_example

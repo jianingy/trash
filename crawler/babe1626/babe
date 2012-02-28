@@ -1,0 +1,31 @@
+#!/bin/bash
+
+curl=$(which curl)
+root=$(dirname $(readlink -f $0))
+base="http://babe.1626.com/pages"
+opt_num_download=2
+for opt in $*; do
+	case "$opt" in
+		-n) optval="opt_id" ;;
+		-p) optval="opt_num_download" ;;
+		*) [ -n "$optval" ] && eval "$optval=\"$opt\"" && unset optval ;;
+	esac
+done
+if [ -z "$opt_id" ]; then
+	echo "usage: $0 -n baby_id"
+	echo "download hot baby pictures from babe.1626.com"
+	echo
+	echo "bug reports to shiqian@taobao.com"
+	exit
+fi
+echo downloading babies into $root/$opt_id ... >&2
+mkdir -p $root/$opt_id
+cd $root/$opt_id
+for page in "$base/$opt_id/1" $($curl -s "$base/$opt_id/1" | grep -o "$base/$opt_id/[[:digit:]]\+")
+do
+	echo "fetching page $page ..." >&2
+	curl -s "$page" | grep -o 'src="[^"]\+\.jpg"' | grep wp-content | awk -F'"' '{print $2}' | xargs -n1 -P $opt_num_download  wget -q
+done
+for photo in *; do
+	echo "<img src=\"$photo\">" >> index.html
+done

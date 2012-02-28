@@ -1,0 +1,56 @@
+* Introduction
+
+/OpenSSH TunnelBroker/ is a tool for creating daemontools scripts that
+preserve a ssh port forwarding proccess.
+
+The purpose of this script is to manage many port forwarding process
+in a computer effectively.
+
+* Case Study
+
+
+Forwarding port 8080 on 192.168.1.1 through remotehost.example.org to
+port 8888 at localhost
+
+** Write a configuration and save as etc/example.yml
+
+#+begin_example
+---
+hostname: remotehost.example.org
+port: 22
+bind: 0.0.0.0
+strictchecking: no
+gateway: yes
+mode: local
+remoteip: 192.168.1.1
+remoteport: 8080
+localport: 8888
+identity: |
+  -----BEGIN RSA PRIVATE KEY-----
+  LINE1
+  LINE2
+  LINE3
+  LINE4
+  -----END RSA PRIVATE KEY-----"
+#+end_example
+
+** Install the service
+
+After executes the following command, a service will be installed at
+/service for daemontools to pick up and run.
+
+#+begin_example
+$ bin/tbsvc install example
+#+end_example
+
+** Control the service
+#+begin_example
+$ bin/tbsvc start example
+$ bin/tbsvc restart example
+$ bin/tbsvc stop example
+$ bin/tbsvc stat example
+#+end_example
+
+
+
+

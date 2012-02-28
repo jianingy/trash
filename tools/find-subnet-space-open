@@ -1,0 +1,4 @@
+#!/bin/sh
+root=$(readlink -f $(dirname $0))
+myip=$($root/find-my-ip)
+$root/expand-ip-space $myip | $root/find-open-ip

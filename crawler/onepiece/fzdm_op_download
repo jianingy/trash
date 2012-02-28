@@ -1,0 +1,48 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+# author: jianingy.yang@gmail.com
+
+import re
+import os
+import sys
+from mechanize import Browser
+
+if __name__ == "__main__":
+    html = ""
+    image_re = re.compile('\d{4}\/\d{2}\/\d+\.jpg'); # comic image regex
+    base_url = 'http://www.fzdm.com/manhua/2/%s/index.html' # download url of fzdm.com
+    if len(sys.argv) < 2:
+        print "usage: op_download #episode"
+        print "download the cartoon \"one piece\" from fzdm.com into"
+        print "current directory."
+        print
+        sys.exit(255)
+    id = sys.argv[1] # #episode to download
+    br = Browser()
+    br.open(base_url % id)
+    response = br.response()
+
+    num = 1
+    while True:
+        body = response.read()
+
+        # find and download images
+        match = image_re.search(body)
+        image_url = "http://www1.fzdm.com/%s" % match.group()
+        print "Downloading page %d from %s" % (num, image_url)
+        os.system("wget -c -qO %02d.jpg '%s'" % (num, image_url))
+
+        # generate an index page
+        html += "<center><img src='%02d.jpg'><br><hr><br></center>\n" % (num)
+        try:
+            #response = br.follow_link(url_regex="index_\d+\.html", nr=0)
+            # goto next page if exists
+            response = br.follow_link(text_regex="下一页".decode('utf-8').encode('gbk'), nr=0)
+            num = num + 1
+        except:
+            # reach the final page when exception occured
+            print "Download finished."
+            html = "<html><body>" + html + "</body></html>"
+            file("index.html", "w+").write(html)
+            sys.exit(0)
+# vim: ts=4 sw=4 ai et

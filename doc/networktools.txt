@@ -1,0 +1,79 @@
+p. 介绍一下这两天写的几个处理IP地址相关的工具(PS:只能在Linux上使用哦)。大家可以在 "我的GitHub":http://github.com/jianingy/network-scripts 查看到源代码。也可以直接下载。
+
+p. 下载地址：
+
+* "下载Tar包":http://github.com/jianingy/network-scripts/tarball/master
+* "下载Zip包":http://github.com/jianingy/network-scripts/zipball/master
+
+下面分别介绍一下这几个工具。
+
+h2. compress-ip-space
+
+p. 用来将一组IP地址转换成CIDR表示形式。例如，我们有一张IP地址列表
+
+bq.. 192.168.1.0
+192.168.1.1
+192.168.1.2
+...
+192.168.1.63
+192.168.1.65
+192.168.1.66
+...
+192.168.1.255
+
+p. 使用compress-ip-space来获得这个列表的CIDR表示形式:
+
+bq. $ compress-ip-space /tmp/iplist
+192.168.1.0/26
+192.168.1.65/32
+192.168.1.66/31
+192.168.1.68/30
+192.168.1.72/29
+192.168.1.80/28
+192.168.1.96/27
+192.168.1.128/25
+
+h2. expand-ip-space
+
+p. 用来将一个CIDR表示的IP地址展开为IP地址列表，例如
+
+bq. $ expand-ip-space 192.168.1.0/29
+192.168.1.0
+192.168.1.1
+192.168.1.2
+192.168.1.3
+192.168.1.4
+192.168.1.5
+192.168.1.6
+192.168.1.7
+
+h2. find-subnet-space-open & find-subnet-space-used
+
+p. 分别用来查找当前局域网里可以使用的IP地址和已经被使用的IP地址。他们的原理十分简单，仅仅依靠先发送PING包，之后检查本地ARP表是否追加了目标地址的MAC地址。
+
+
+h2. find-ip-range
+
+p. 给出一个CIDR表示方式的IP地址，通过find-ip-range可以找出这个地址所在IP段的范围。例如：
+
+bq. $ find-ip-range 192.168.1.27/29
+192.168.1.24-192.168.1.31
+
+h2. find-my-ip & find-my-nic
+
+p. 分别用来显示本机的出口IP地址，以及出口网络接口设备名称。例如：
+
+bq. $ find-my-ip
+192.168.0.2/24
+$ find-my-nic
+eth0
+
+h2. cidr2mask & mask2cidr
+
+p. 用来在CIDR表示形式和子网掩码表示形式之间进行转换。mask2cidr是cidr2mask的一个符号链接。使用方法如下：
+
+bq. $ mask2cidr 192.168.2.4/255.255.255.252
+192.168.2.4/30
+$ cidr2mask 192.168.3.7/29
+192.168.3.7/255.255.255.248
+

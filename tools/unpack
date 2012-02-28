@@ -1,0 +1,32 @@
+#!/bin/bash
+
+# jianing yang <jianingy.yang@gmail.com>
+
+uri=$1
+wget=$(which wget 2>/dev/null)
+
+if [ -z "$wget" ];then
+	echo 'Dependence Error: can not find wget'
+	exit
+fi
+
+if [ -z "$uri" ]; then
+	echo "Usage: $0 URL"
+	echo "unpack packages from remote without local storage"
+	echo
+	echo "written by jianing yang <jianingy.yang@gmail.com>"
+	exit
+fi
+
+basename=$(basename $uri)
+extractors=('.tar.bz2::tar jxvf' '.tar.gz::tar zxvf' '.tar::tar xvf')
+
+for item in "${extractors[@]}"; do
+	extname=${item%%::*}
+	extractor=${item##*::}
+	[ "$extname" == "${basename:$(expr -${#extname})}" ] && break
+done
+
+$wget -qO - "$uri" | $extractor -
+
+# vim: ts=4 sw=4 ai et

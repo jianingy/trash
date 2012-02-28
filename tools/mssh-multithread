@@ -1,0 +1,250 @@
+#!/usr/bin/python
+# author: jianingy.yang AT gmail DOT com
+#
+# Copyright (c) 2010, Jianing Yang All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or
+# without modification, are permitted provided that the
+# following conditions are met:
+#
+# Redistributions of source code must retain the above
+# copyright notice, this list of conditions and the following
+# disclaimer. Redistributions in binary form must reproduce
+# the above copyright notice, this list of conditions and the
+# following disclaimer in the documentation and/or other
+# materials provided with the distribution. Neither the name
+# of the Jianing Yang nor the names of its contributors may
+# be used to endorse or promote products derived from this
+# software without specific prior written permission. THIS
+# SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND
+# CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+# INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+# MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+# CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+# NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+# LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+# HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+# OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+# SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+import sys, time
+import paramiko
+import getpass, argparse, logging
+import threading
+from threading import Thread
+
+def print_output(hostname, code, stdout, stderr, options):
+  """Prints command output"""
+  (cstart, cfinish) = ("", "")
+  if options.color:
+    (cstart, cfinish) = ("\033[1;32m", "\033[0;0m")
+  fmt = "%s%%s%s:%%s" % (cstart, cfinish)
+  header = hostname + "(%s)" % code
+  text = stdout.split("\n")
+  for i, line in enumerate(text):
+    if i == 0:
+      print fmt % (header, line)
+    elif line:
+      print fmt % (" " * len(header), line)
+
+def print_summary(status):
+  succeeded = list()
+  failed = list()
+  for (hostname, exitcode) in status.items():
+    if exitcode == 0:
+      succeeded.append(hostname)
+    else:
+      failed.append(hostname)
+  print "Failed(%d):" % len(failed), ",".join(failed)
+  print "Succeeded(%d):" % len(succeeded), ",".join(succeeded)
+
+def fix_command(command, hostname, options):
+  """Patches command string with some rules"""
+
+  # patches replace_string
+  if options.replace_string:
+    command = command.replace(options.replace_string, hostname)
+
+  # patches sudo
+  if options.sudo:
+    command = "sudo -H -S -u '%s' %s" % (options.sudo_user, command)
+
+  return command
+
+def multi_thread_execute_ssh(hostname, command, options, result, cv):
+  """Starts a SSHClient and runs command with it"""
+  try:
+    # create a SSHClient
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+    # connect to server
+    client.connect(hostname, username=options.user,
+                   password=options.user_password,
+                   timeout = options.timeout,
+                   key_filename=options.identities)
+    channel = client.get_transport().open_session()
+    channel.settimeout(options.timeout)
+
+    # execute the command with pactches
+    command = fix_command(command, hostname, options)
+    channel.exec_command(command)
+    if options.sudo:
+      channel.send(options.sudo_password)
+    channel.shutdown_write()
+
+    # retreive output
+    if options.stderr == '-':
+      channel.set_combine_stderr(True)
+    cstdout = channel.recv(options.stdout_max)
+    cstatus = channel.recv_exit_status()
+    if options.stderr and not options.stderr == '-':
+      cstderr = channel.recv_stderr(options.stdout_max)
+      file(options.stderr, "a+").write("%d %s %s" % (cstatus, hostname, cstderr))
+    channel.shutdown_read()
+
+  except Exception as e:
+    cstatus = "!"
+    cstdout = ""
+
+  cv.acquire()
+  result.append((threading.current_thread(), hostname, cstatus, cstdout, ""))
+  cv.notify()
+  cv.release()
+
+def multi_thread_ssh(command, nodes, options):
+  """Manages threads"""
+  loop = True
+  cv = threading.Condition()
+  interval = 0.1
+  (remain, output, status, timeout) = (list(), list(), dict(), dict())
+
+# initialize threads
+  for node in nodes:
+    context=(node, command, options, output, cv)
+    thread = Thread(target=multi_thread_execute_ssh, args=context)
+    remain.append(thread)
+
+  initial_count = threading.active_count()
+  options.parallel = options.parallel + initial_count
+
+# start threads
+  while loop:
+    while remain and threading.active_count() < options.parallel:
+      thread = remain.pop()
+      thread.start()
+
+    cv.acquire()
+
+    while not output:
+      cv.wait()
+
+    incomplete = list()
+
+    while output:
+      (thread, node, code, stdout, stderr) = item = output.pop()
+      thread.join(interval)
+      if thread.isAlive():
+        incomplete.append(item)
+      else:
+        status[node] = code
+        print_output(node, code, stdout, stderr, options)
+
+    while incomplete:
+      output.append(incomplete.pop())
+
+    if threading.active_count() == initial_count:
+      loop = False
+    cv.release()
+ 
+  print_summary(status)
+
+def parse_option():
+  epilog="""Examples:\n
+    mssh -h server1,server2,server3 uptime
+    mssh -h server1,server2,server3 --stderr - which abcdefg
+
+Bug reports to jianingy.yang@gmail.com
+"""
+  p = argparse.ArgumentParser(
+    prog="mssh",
+    formatter_class=argparse.RawDescriptionHelpFormatter,
+    epilog=epilog,
+    conflict_handler="resolve",
+    description="run command on target hosts simultaneously over ssh"
+    )
+  g = p.add_mutually_exclusive_group()
+  g.add_argument("-h", "--host", dest="hostname", type=str,
+                 help="hostname or ip of target hosts")
+  g.add_argument("-f", "--file", dest="hostfile", type=str,
+                 help="file contains hostname or ip of target hosts")
+  p.add_argument("-m", "--max", type=int, default=20, dest="parallel",
+                 help="# of max concurrent running thread")
+  p.add_argument("--timeout", type=float, default=30,
+                 help="timeout of each connection")
+#  p.add_argument("--global-timeout", type=int,
+#                 help="timeout of all")
+  p.add_argument("--stderr", type=str, default=None, dest="stderr",
+                 help="write stderr into a file")
+  p.add_argument("--max-stdout", type=int, default=4096, dest="stdout_max",
+                 help="maximium # of bytes to be read from stdout")
+  p.add_argument("--max-stderr", type=int, default=4096, dest="stderr_max",
+                 help="maximium # of bytes to be read from stderr")
+  p.add_argument("-I", "--replace-string", type=str, default=None, 
+                 dest="replace_string",
+                 help="replace this will the hostname")
+  p.add_argument("-i", "--identity", type=str, default=None, nargs="+",
+                 dest="identities",
+                 help="key files for publickey authenication")
+  p.add_argument("--user", type=str, default=getpass.getuser(), dest="user",
+                 help="username for login")
+  p.add_argument("--password", default=False, dest="password",
+                 action="store_true",
+                 help="prompt login password")
+  p.add_argument("--sudo", default=False, dest="sudo", action="store_true",
+                 help="invoke sudo on target machine")
+  p.add_argument("--sudo-user", type=str, default="root", dest="sudo_user",
+                 help="username for --sudo option")
+  p.add_argument("--color", default=False, dest="color", action="store_true",
+                 help="display a colorful output")
+  p.add_argument("-v", "--verbose", default=False, dest="verbose",
+                 action="store_true",
+                 help="output verbose information into stderr")
+  p.add_argument(dest="command", type=str, nargs="+",
+                 help="command to be execute on target host")
+
+  options = p.parse_args()
+
+  if options.stderr and not options.stderr == '-':
+    file(options.stderr, "w").write("")
+
+  if options.password:
+    password = getpass.getpass("password for %s: " % options.user)
+    options.user_password = password
+  else:
+    options.user_password = None
+
+  if options.sudo:
+    password = getpass.getpass("[sudo] password for %s: " % options.sudo_user)
+    options.sudo_password = password
+  return options
+
+def retrieve_hostname(options):
+  if options.hostname:
+    return options.hostname.split(",")
+  elif options.hostfile:
+    return file(options.hostfile, "r").read().splitlines()
+
+def main():
+  options = parse_option()
+  command = " ".join(options.command)
+  if options.verbose:
+    print >>sys.stderr, "# command: " + command
+  hostnames = retrieve_hostname(options)
+  multi_thread_ssh(command, hostnames, options)
+
+if __name__ == "__main__":
+  main()

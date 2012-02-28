@@ -1,0 +1,157 @@
+#!/bin/bash 
+
+# jianing yang <jianingy.yang@gmail.com>
+
+_bash_range_rc=$NODERC
+_delimiter="\n"
+_sort=
+
+_expand_simple_range()
+{
+    local expr prefix start end suffix posthead prehead range space id
+    local real_start real_prefix
+    local regex_full regex_head="^([-_A-Za-z0-9.@]*[^-0-9])?([0-9]+)(\.[^-]*)?-"
+
+    expr=$1
+
+    if [[ $expr =~ $regex_head ]]; then
+        prefix=${BASH_REMATCH[1]}
+        start=${BASH_REMATCH[2]}
+        suffix=${BASH_REMATCH[3]}
+        regex_full="^($prefix)?($start)($suffix)?-($prefix)?([0-9]+)(\.[-_A-Za-z0-9.]*)?$"
+        if [[ $expr =~ $regex_full ]]; then
+            if [ -n "$suffix" -a "$suffix" != "${BASH_REMATCH[6]}" ]; then
+                echo $expr
+                return
+            fi
+            suffix=${BASH_REMATCH[6]}
+            end=${BASH_REMATCH[5]}
+            if [ ${#start} -gt ${#end} ]; then
+                real_start=${start:((0 - ${#end}))}
+                real_prefix="$prefix${start:0:((${#start} - ${#end}))}"
+            else
+                real_start=$start
+                real_prefix=$prefix
+            fi
+            if [ -n "${BASH_REMATCH[4]}" ]; then
+                prehead="$prefix$start"
+                posthead=${BASH_REMATCH[4]}${BASH_REMATCH[6]}
+                if [ "${posthead:0:${#real_prefix}}" != "${prehead:0:${#real_prefix}}" ]; then
+                    echo $expr
+                    return
+                fi
+            fi
+
+            for ((id=$real_start; id <= $end; id++)); do
+                local n=$(expr ${#end} - ${#id})
+                [ $n -gt $(expr ${#start} - 1) ] && n=$(expr ${#start} - 1)
+                (( n++ ))
+                _expand_single_range "$(printf "%s%0${n}d%s" $real_prefix $id $suffix)"
+            done
+            return
+        fi
+    fi
+
+    echo $expr
+    return
+}
+
+_expand_simple_group()
+{
+    local expr name g gs
+    expr=$1
+    name=${expr:1}
+    OFS=$IFS
+    IFS=' '
+    [ -z "$name" ] && return
+    eval "[ -z \"\${__${name}__}\" ] && return || expr=\${__${name}__}";
+    eval "_expand_range \${__${name}__}";
+    IFS=$OFS
+}
+
+_expand_single_range()
+{
+    local expr tag
+    expr=$1
+    tag=${expr:0:1}
+    for node in $(_expand_simple_range $expr); do
+        if [ "${node:0:1}" == "@" ]; then
+            _expand_simple_group ${node}
+        else
+            echo $node
+        fi
+    done
+}
+
+_expand_range()
+{
+    local raw include exclude union
+    raw=$1
+    OFS=$IFS
+    IFS=,
+    for expr in ${raw[@]}; do
+        if [ "${expr:0:1}" == "-" ]; then
+            exclude="$(_expand_single_range ${expr:1}) $exclude"
+        elif [ "${expr:0:1}" == "&" ]; then
+            union="$(_expand_single_range ${expr:1}) $union"
+        else
+            include="$(_expand_single_range $expr) $include"
+        fi
+    done
+    IFS=$OFS
+    [ -n "$exclude" ] && include=$(grep -xvf <(echo -ne "${exclude// /\n}") <(echo -ne "${include// /\n}"))
+    [ -n "$union" ] && include=$(grep -xf <(echo -ne "${union// /\n}") <(echo -ne "${include// /\n}"))
+    echo -ne $include | tr '\n' ' ' | sort -u
+    return
+}
+
+expand_range()
+{
+
+    local expand="$(echo $(_expand_range $1))"
+    echo -ne "${expand// /$_delimiter}\n" | sort -n
+}
+
+help()
+{
+    echo "$0 [OPTIONS] RANGE"
+    echo "Expand RANGE expression"
+    echo "OPTIONS:"
+    echo "        -d|-delimiter|--delimiter         delimiter, default to newline"
+    echo "        -s|-sort|--sort                   sort result"
+    echo "        -h|-help|--help                   this message"
+    echo ""
+    echo "Report bugs to jianing.yang@alibaba-inc.com"
+}
+
+[ -n "$_bash_range_rc" -a -r "$_bash_range_rc" ] && source $_bash_range_rc
+
+until [ -z "$1" ]; do
+    case "$1" in
+        -d|-delimiter|--delimiter)
+            shift
+            _delimiter=$1
+        ;;
+        -s|-sort|--sort)
+            _sort=$1
+        ;;
+        -h|-help|--help)
+            action="help"
+            break
+        ;;
+        *)
+            action="expand"
+            range=$1
+        ;;
+    esac
+    shift
+done
+
+[ -z "$range" ] && action="help"
+case "$action" in
+    expand) expand_range $range ;;
+    help) help;;
+esac
+
+
+# vim: ts=4 sw=4 et ai

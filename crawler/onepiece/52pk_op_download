@@ -1,0 +1,93 @@
+#!/usr/bin/env python2.6
+# -*- encoding: utf-8 -*-
+# author: jianingy.yang@gmail.com
+import sys
+import os
+import re
+import time
+from mechanize import Browser
+
+class op_download:
+
+  def __init__(self, root):
+    self.root = root
+    self.list_map = dict()
+    self.list_url = 'http://op.52pk.com/manhua/'
+    self.list_re = re.compile(u'<a.+?href=[\'"]?([^ "]+)[\'"]?[^>]+>(.+?)</a>')
+    self.episode_re = re.compile(u'海贼王\s*(\d+)话')
+    self.option_re = re.compile(u'<option\s*value="([^"]+)"\s*>\s*(\d+)\s*</option>')
+    self.image_re = re.compile(u'<img\s+.*?src="(.*?allimg.*?)"\s*/?\s*>')
+    self.strip_tag_re = re.compile(u'<[^>]+?>')
+    self.browser = Browser()
+
+  def strip_tag(self, text):
+    return self.strip_tag_re.sub('', text)
+
+  def extract_episode(self, anchor_text):
+    text = self.strip_tag(anchor_text)
+    match_obj = self.episode_re.search(text)
+    if match_obj:
+      return match_obj.group(1)
+    else:
+      return None
+
+  def download_list_map(self):
+    if len(self.list_map) > 0:
+      return
+    self.status("downloading list page %s" % self.list_url)
+    self.browser.open(self.list_url)
+    response = self.browser.response()
+    html = response.read().decode('GBK')
+    for (href, anchor_text) in self.list_re.findall(html):
+      episode = self.extract_episode(anchor_text)
+      if episode:
+        self.list_map[int(episode)] = href
+
+  def download_image_page(self, episode):
+    self.status("downloading image page %s" % episode)
+    href = self.list_map[episode]
+    self.browser.open(href)
+    html = self.browser.response().read().decode('GBK')
+    image_url = {1: href}
+    for (image_href, id) in self.option_re.findall(html):
+      image_url[int(id)] = image_href
+    return image_url
+
+  def download_image(self, episode, page):
+    for id in page.keys():
+      href = page[id]
+      self.browser.open(href)
+      html = self.browser.response().read().decode('GBK')
+      match = self.image_re.search(html)
+      if match:
+        image_href = match.group(1)
+        self.status("downloading episode %s page %s" % (episode, id))
+        try:
+          os.makedirs("%s/%s" % (self.root, episode))
+        except:
+          pass
+        os.system("/usr/bin/wget -O %s/%s/%s.jpg %s" % (self.root, episode, id, image_href))
+
+  def download(self, episode):
+    self.download_list_map()
+    page = self.download_image_page(episode)
+    self.download_image(episode, page)
+
+  def download_all(self):
+    self.download_list_map()
+    for episode in self.list_map.keys():
+      page = self.download_image_page(episode)
+      self.download_image(episode, page)
+
+  def status(self, text):
+    print >>sys.stderr, time.asctime(), '|', text
+
+if __name__ == "__main__":
+  downloader = op_download(root=os.getenv('OP_DOWNLOAD_ROOT', '.'))
+  if len(sys.argv) > 1:
+    episode = sys.argv[1]
+    downloader.download(episode)
+  else:
+    downloader.download_all()
+
+# vim: ts=2 sw=2 ai et

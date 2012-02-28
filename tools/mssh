@@ -1,0 +1,432 @@
+#!/usr/bin/env python
+# author: jianingy.yang AT gmail DOT com
+#
+# Copyright (c) 2010, Jianing Yang All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or
+# without modification, are permitted provided that the
+# following conditions are met:
+#
+# Redistributions of source code must retain the above
+# copyright notice, this list of conditions and the following
+# disclaimer. Redistributions in binary form must reproduce
+# the above copyright notice, this list of conditions and the
+# following disclaimer in the documentation and/or other
+# materials provided with the distribution. Neither the name
+# of the Jianing Yang nor the names of its contributors may
+# be used to endorse or promote products derived from this
+# software without specific prior written permission. THIS
+# SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND
+# CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+# INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+# MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+# CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+# NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+# LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+# HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+# OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+# SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+from twisted.internet import epollreactor
+epollreactor.install()
+
+from twisted import conch
+from twisted.conch import error
+from twisted.internet import defer, protocol, reactor
+from twisted.conch.ssh import transport, connection, channel
+from twisted.conch.ssh import common, keys, userauth
+from twisted.conch.client import agent, default
+
+import os, sys, glob, getpass, struct, argparse, socket
+
+class ClientPasswordAuth(userauth.SSHUserAuthClient):
+
+    def __init__(self, opts, connection):
+        userauth.SSHUserAuthClient.__init__(self, opts.user, connection)
+        self.password = opts.user_password
+
+    def getPassword(self):
+        return defer.succeed(self.password)
+
+class ClientKeyAuth(userauth.SSHUserAuthClient):
+
+    def __init__(self, options, *args):
+        userauth.SSHUserAuthClient.__init__(self, options.user, *args)
+        self.keyAgent = None
+        self.options = options
+        self.usedFiles = []
+        self.conn = args[0]
+        self.factory = self.conn.transport.factory
+        if not options.identities:
+            options.identities = ['~/.ssh/id_rsa', '~/.ssh/id_dsa']
+
+    def serviceStarted(self):
+        if 'SSH_AUTH_SOCK' in os.environ:
+            cc = protocol.ClientCreator(reactor, agent.SSHAgentClient)
+            d = cc.connectUNIX(os.environ['SSH_AUTH_SOCK'])
+            d.addCallback(self._setAgent)
+            d.addErrback(self._ebSetAgent)
+        else:
+            userauth.SSHUserAuthClient.serviceStarted(self)
+
+    def serviceStopped(self):
+        if self.keyAgent:
+            self.keyAgent.transport.loseConnection()
+            self.keyAgent = None
+
+    def _setAgent(self, a):
+        self.keyAgent = a
+        d = self.keyAgent.getPublicKeys()
+        d.addBoth(self._ebSetAgent)
+        return d
+
+    def _ebSetAgent(self, f):
+        userauth.SSHUserAuthClient.serviceStarted(self)
+
+    def getPassword(self, prompt = None):
+        return None
+
+    def getPublicKey(self):
+        if self.keyAgent:
+            key = self.keyAgent.getPublicKey()
+            if key is not None:
+                return key
+        files = [x for x in self.options.identities if x not in self.usedFiles]
+        if not files:
+            self.conn.transport.loseConnection()
+            return None
+        file = files[0]
+        self.usedFiles.append(file)
+        file = os.path.expanduser(file) + ".pub"
+        if not os.path.exists(file):
+            return self.getPublicKey() # try again
+        try:
+            return keys.Key.fromFile(file)
+        except keys.BadKeyError:
+            return self.getPublicKey() # try again
+
+    def signData(self, publicKey, signData):
+        if not self.usedFiles: # agent key
+            if "blob" in dir(publicKey):
+                return self.keyAgent.signData(publicKey.blob(), signData)
+            else:
+                return self.keyAgent.signData(publicKey, signData)
+        else:
+            return userauth.SSHUserAuthClient.signData(self, publicKey, signData)
+
+    def getPrivateKey(self):
+        file = os.path.expanduser(self.usedFiles[-1])
+        if not os.path.exists(file):
+            return None
+        try:
+            return defer.succeed(keys.Key.fromFile(file))
+        except keys.EncryptedKeyError:
+            prompt = "Enter passphrase for key '%s': " % \
+                self.usedFiles[-1]
+            try:
+                if not self.factory.passphrase:
+                    p = getpass.getpass(prompt)
+                else:
+                    p = self.facotry.passphrase
+                return defer.succeed(keys.Key.fromFile(file, passphrase=p))
+            except (keys.BadKeyError, keys.EncryptedKeyError):
+                return defer.fail(Exception("Key Error"))
+            except KeyboardInterrupt:
+                reactor.stop()
+            raise
+
+class ClientConnection(connection.SSHConnection):
+
+    def __init__(self, transport, opts, *args, **kwargs):
+        connection.SSHConnection.__init__(self)
+        self.options = opts
+        self.transport = transport
+
+    def serviceStarted(self):
+        self.openChannel(CommandChannel(options, conn = self))
+
+    def channelClosed(self, channel):
+        self.transport.loseConnection()
+
+class ClientTransport(transport.SSHClientTransport):
+
+    def __init__(self, factory, addr):
+        self.factory = factory
+        self.addr = addr
+
+    def verifyHostKey(self, pubKey, fingerprint):
+        return defer.succeed(1)
+
+    def connectionSecure(self):
+        options = self.factory.options
+        if options.user_password:
+            self.requestService(ClientPasswordAuth(
+                    options, ClientConnection(self, options)))
+        else:
+            self.requestService(ClientKeyAuth(
+                    options, ClientConnection(self, options)))
+
+class ClientFactory(protocol.ClientFactory):
+
+    def __init__(self, command, opts):
+        self.connection = dict()
+        self.data = dict()
+        self.waiting = list()
+        self.failed = list()
+        self.succeeded = list()
+        self.command = command
+        self.options = opts
+        self.passphrase = None
+
+    def connect(self, client):
+        (hostname, port) = client
+        reactor.connectTCP(hostname, port, self)
+
+    def timeout(self):
+        if reactor.running:
+            reactor.stop()
+
+    def print_summary(self):
+        abandoned = list()
+        abandoned.extend([n for (n,p) in self.waiting])
+        abandoned.extend([d for d in self.connection.keys()])
+        print "Failed(%d):" % len(self.failed), ",".join(self.failed)
+        if abandoned:
+            print "Abandoned(%d):" % len(abandoned), ",".join(abandoned)
+        print "Succeeded(%d):" % len(self.succeeded), ",".join(self.succeeded)
+
+    def print_output(self, hostname, exit_code, stdout, stderr):
+        (cs, ce) = ("", "")
+        if not options.nocolor:
+            (cs, ce) = ("\033[1;32m", "\033[0;0m")
+            if exit_code:
+                cs = "\033[1;31m"
+        fmt = "%s%%s%s:%%s" % (cs, ce)
+        header = hostname + "/%s" % exit_code
+        if stdout:
+            text = stdout.split("\n")
+            for i, line in enumerate(text):
+                if i == 0:
+                    print fmt % (header, line)
+                elif line:
+                    print fmt % (" " * len(header), line)
+        elif stderr:
+            print fmt % (header, "(%s)" % stderr.strip().replace("\n", "|"))
+
+    def run(self, hosts):
+        if options.global_timeout:
+            reactor.callLater(options.global_timeout, self.timeout)
+        if options.verbose:
+            print >>sys.stderr, "# number of hosts: %d" % (len(hosts)) 
+        for i, hostname in enumerate(hosts):
+            if i < options.parallel:
+                self.addClient((hostname, options.port))
+            else:
+                self.waiting.append((hostname, options.port))
+        reactor.run()
+        self.print_summary()
+
+    def addClient(self, client):
+        (hostname, port) = client
+        self.connect(client)
+
+    def buildProtocol(self, addr):
+        return ClientTransport(self, addr)
+
+    def abortConnection(self, connector):
+        dest = connector.getDestination()
+        if not dest.host in self.data:
+            self.data[dest.host] = (255, "", "timed out")
+            if connector.transport:
+                connector.transport.loseConnection()
+            self.clientConnectionLost(connector, None)
+
+    def startedConnecting(self, connector):
+        dest = connector.getDestination()
+        self.connection[dest.host] = True
+        if self.options.timeout:
+            reactor.callLater(self.options.timeout, self.abortConnection,
+                              connector)
+
+    def clientConnectionLost(self, connector, reason):
+        dest = connector.getDestination()
+
+        if not dest.host in self.connection:
+            return
+
+        del self.connection[dest.host]
+
+        if self.waiting and len(self.connection) < options.parallel: 
+            self.addClient(self.waiting.pop()) # start new connection
+
+        if dest.host in self.data:
+            (status, output, ext_output) = self.data[dest.host]
+            self.print_output(dest.host, status, output, ext_output)
+            if status == 0:
+                self.succeeded.append(dest.host)
+            else:
+                self.failed.append(dest.host)
+        else:
+            self.failed.append(dest.host)
+
+        if not self.connection and not self.waiting and reactor.running:
+            reactor.stop()
+
+class CommandChannel(channel.SSHChannel):
+
+    name = 'session'
+
+    def __init__(self, opts, *args, **kwargs):
+        channel.SSHChannel.__init__(self, *args, **kwargs)
+        self.output = self.ext_output = ""
+        self.exit_status = None
+        self.eof = False
+        self.options = opts
+        self.factory = self.conn.transport.factory
+
+    def fix_command(self, command, options):
+        # patches replace_string
+        if options.replace_string:
+            hostname = self.conn.transport.transport.connector.getDestination().host
+            command = command.replace(options.replace_string, hostname)
+        # patches sudo
+        if options.sudo:
+            command = "sudo -H -S -u '%s' %s" % (options.sudo_user, command)
+
+        return command
+
+    def channelOpen(self, data):
+        command = self.fix_command(self.conn.transport.factory.command,
+                                   self.options)
+        self.conn.sendRequest(
+            self, 'exec', common.NS(command), wantReply = True).addCallback(
+            self.sendRequest)
+
+    def _deliverResponse(self):
+        if self.exit_status == None or not self.eof:
+            return 
+        dest = self.conn.transport.transport.connector.getDestination()
+        factory = self.conn.transport.factory
+        factory.data[dest.host] = (self.exit_status, self.output, self.ext_output)
+        self.loseConnection()
+
+    def sendRequest(self, _):
+        if self.options.sudo:
+            self.write(self.options.sudo_password)
+        self.conn.sendEOF(self)
+
+    def dataReceived(self, data):
+        self.output = self.output + data
+
+    def extReceived(self, dataType, data):
+        self.ext_output = self.ext_output + data
+
+    def request_exit_status(self, data):
+        self.exit_status = struct.unpack('>L', data)[0]
+        self._deliverResponse()
+
+    def eofReceived(self):
+        self.eof = True
+        self._deliverResponse()
+
+def parse_option():
+    epilog="""Examples:\n
+    mssh -h server1,server2,server3 uptime
+    mssh -h server1,server2,server3 --stderr - which abcdefg
+
+Bug reports to jianingy.yang@gmail.com
+"""
+    p = argparse.ArgumentParser(
+        prog="mssh",
+        formatter_class = argparse.RawDescriptionHelpFormatter,
+        epilog = epilog,
+        conflict_handler = "resolve",
+        description = "run command on enormous number of target hosts simultaneously"
+        )
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("-h", "--host", dest="hostname", type=str,
+                   help="a list of hostnames separated by comma")
+    g.add_argument("-f", "--file", dest="hostfile", type=str,
+                   help="the name of a file which contains hostnames, one per each line")
+    p.add_argument("-p", "--port", dest="port", type=int, default=22,
+                   help="port to connect to on the remote host")
+    p.add_argument("-m", "--max", type=int, default=20, dest="parallel",
+                   help="number of max concurrent running client")
+    p.add_argument("--timeout", type=float, default=15,
+                   help="timeout of each host")
+    p.add_argument("--global-timeout", type=int, dest="global_timeout", 
+                   default=None, help="timeout for all")
+#  p.add_argument("--stderr", type=str, default=None, dest="stderr",
+#                 help="write stderr into a file")
+#    p.add_argument("--max-stdout", type=int, default=4096, dest="stdout_max",
+#                   help="maximium number of bytes to be read from remote's stdout")
+#    p.add_argument("--max-stderr", type=int, default=4096, dest="stderr_max",
+#                   help="maximium number of bytes to be read from remote's stderr")
+    p.add_argument("-I", "--replace-string", type=str, default=None, 
+                   dest="replace_string",
+                   help="this will be replaced with the hostname in command text")
+    p.add_argument("-i", "--identity", type=str, default=None,
+                   dest="identities",
+                   help="key files for publickey authenication separated by comma")
+    p.add_argument("--user", type=str, default=getpass.getuser(), dest="user",
+                   help="login username")
+    p.add_argument("--password", default=False, dest="password",
+                   action="store_true",
+                   help="use password authtication")
+    p.add_argument("--sudo", default=False, dest="sudo", action="store_true",
+                   help="run command using sudo")
+    p.add_argument("--sudo-user", type=str, default="root", dest="sudo_user",
+                   help="username for sudo")
+    p.add_argument("--nocolor", default=False, dest="nocolor", action="store_true",
+                   help="do not color output")
+    p.add_argument("-v", "--verbose", default=False, dest="verbose",
+                   action="store_true",
+                   help="run with verbose information")
+    p.add_argument(dest="command", type=str, nargs="+",
+                   help="command to be executed")
+
+    options = p.parse_args()
+
+#  if options.stderr and not options.stderr == '-':
+#    file(options.stderr, "w").write("")
+
+    if options.password:
+        password = getpass.getpass("password for %s: " % options.user)
+        options.user_password = password
+    else:
+        options.user_password = None
+
+    if options.sudo:
+        if options.password:
+            options.sudo_password = options.user_password
+        else:
+            options.sudo_password = getpass.getpass("[sudo] password for %s: " %
+                                                    options.sudo_user)
+
+    if options.identities:
+        options.identities = options.identities.split(",")
+
+    return options
+
+
+def multiplex_ssh_execute(hosts, command, options):
+    client = ClientFactory(command, options)
+    client.run(hosts)
+
+def retrieve_hostname(options):
+  if options.hostname:
+    return dict([(k, True) for k in options.hostname.split(",")]).keys()
+  elif options.hostfile:
+    return file(options.hostfile, "r").read().splitlines()
+
+if __name__ == "__main__":
+    options = parse_option()
+    command = " ".join(options.command)
+    if options.verbose:
+        print >>sys.stderr, "# command: " + command
+    hostnames = retrieve_hostname(options)
+    multiplex_ssh_execute(hostnames, command, options)

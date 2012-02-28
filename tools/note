@@ -1,0 +1,68 @@
+#!/bin/bash
+# jianing yang <jianing.yang@gmail.com>
+
+notedir=~/note
+note_return=~/.note-return
+dialog="$(which dialog 2>/dev/null)"
+
+[ ! -x "$dialog" ] && {
+    echo "can not execute dialog"
+    exit 255 
+}
+
+[ ! -d "$notedir" ] && mkdir -p $notedir
+trap "{ rm -f $note_return; exit 255; }" EXIT
+pushd $notedir &>/dev/null || {
+    echo "can not open directory $notedir"
+    exit 255
+}
+
+while true
+do
+    [ -n "$edit" ] && default_item="--default-item $edit"
+    $dialog --title 'Console Notes' --item-help $default_item  \
+           --extra-button \
+           --extra-label "Create" \
+           --menu 'select a note to view or edit' 17 68 10 \
+           --file <(
+                    while read file; do
+                        title=$(head -n1 $file | tr '\n' ' ' | sed 's/^=//g')
+                        echo $file \"${title//\"/\\\"}\" \"View/Edit $file\"
+                    done < <(find . -maxdepth 1 -type f)
+           ) \
+           2>$note_return
+    case "$?" in
+        1) break ;;
+        3)
+             $dialog --title "Create new note" \
+                    --inputbox "Please input the name of the note" 8 56 \
+                    2>$note_return
+            edit=$(head -n1 $note_return)
+            [ -n "$edit" ] && eval "${EDITOR:-vim} $edit"
+            continue
+        ;;
+    esac
+    edit=$(head -n1 $note_return)
+    if [ -n "$edit" ]; then
+        eval `resize -s`
+        height=$( expr $LINES - 4 )
+        width=$( expr $COLUMNS - 16 )
+        while true; do
+            $dialog --title "`cat $note_return`"  \
+                   --extra-button \
+                   --extra-label "Edit" \
+                   --no-shadow  \
+                   --textbox "$edit" \
+                   $height $width 2>/dev/null
+            if [ "$?" == "3" ]; then
+                eval "${EDITOR:-vim} $edit"
+                continue
+            fi
+            break
+        done
+    fi
+done
+popd &>/dev/null
+reset
+
+# vim: ts=4 sw=4 ai et

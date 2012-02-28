@@ -1,0 +1,49 @@
+#!/usr/bin/env perl
+# author: jianingy.yang@gmail.com
+
+use strict;
+use warnings;
+
+my $expr = $ARGV[0];
+my @decimals;
+
+if ($expr && ($expr eq '-h' || $expr eq '--help')) {
+	print STDERR "Usage: $0 [FILE]\n";
+	print STDERR "Compress a list of ip address into CIDR format\n";
+	print STDERR "\n";
+	exit;
+}
+
+while(<>) {
+	chomp;
+	next unless /^\s*(\d+\.\d+\.\d+\.\d+)\s*$/;
+	my $addr = 0;
+	foreach (split /\./) {
+		$addr <<= 8;
+		$addr |= $_;
+	}
+	push @decimals, $addr;
+}
+
+@decimals = sort {$a <=> $b} @decimals;
+
+my @compressed;
+while (@decimals) {
+	my $shift = 0;
+	my $base = shift @decimals;
+	++$shift while $base == ($base & (0xFFFFFFFF << ($shift + 1)));
+	my $capacity = 1;
+	foreach (@decimals) {
+		last unless $_ == $base + $capacity && $capacity < 2 ** $shift;
+		++$capacity;
+	}
+	$capacity = $capacity?2 ** int(log($capacity) / log(2)):0;
+	$shift = log($capacity) / log(2);
+	shift @decimals, while(--$capacity && @decimals);
+	my @ip = (0, 0, 0, 0);
+	foreach (@ip) {
+		$_ = $base & 0xFF;
+		$base >>= 8;
+	}
+	print join(".", reverse @ip)."/".(32 - $shift)."\n";
+}

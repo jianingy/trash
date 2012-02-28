@@ -1,0 +1,32 @@
+#!/bin/bash
+op_download=52pk_op_download
+lock=/tmp/op_download.lock
+root=$(dirname $(readlink -f $0))
+
+# download target directory
+target=${1:-$root/op}
+
+# last #episode
+lastest=$(readlink $target/LATEST)
+
+# #episode to download
+current=$((lastest + 1))
+
+trap "rm -rf $target/COPYING" 1 2 15
+
+if ln -ns $current $target/COPYING; then
+
+	mkdir $(readlink -f $target/COPYING)
+	rm -rf $target/COPYING/*
+
+	pushd $target/COPYING &>/dev/null
+	$root/$op_download $current
+	popd &>/dev/null
+
+	if [ -r $target/COPYING/index.html ]; then
+		mv -T $target/COPYING $target/LATEST
+		exit 0
+	fi
+
+	rm -rf $target/COPYING
+fi

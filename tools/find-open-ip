@@ -1,0 +1,23 @@
+#!/bin/bash
+# author: jianingy.yang@gmail.com
+if [ "x$1" == "x-h" -o "x$1" == "x--help" ]; then
+	echo 2>&1 "Usage: $0"
+	echo 2>&1 "Find open ip addresses by search ARP table"
+	echo 2>&1 ""
+	exit
+fi
+arp=$(which 2>/dev/null /usr/local/sbin/arp /usr/sbin/arp /sbin/arp /usr/local/bin/arp /usr/bin/arp /bin/arp | head -1)
+[ -z "$arp" ] && echo 2>/dev/null "arp command not found" && exit 255
+RECORD=${TMPDIR:-/tmp}/find-open-ip.$$
+trap "rm -f $RECORD; exit" 1 2 15 EXIT
+while read ipaddr
+do
+	(
+		ping &>/dev/null -q -c1 $ipaddr;
+		sleep 5
+		awk '$1 ~ /^'$ipaddr'$/{print}' <($arp -n) >>$RECORD
+	) &
+done
+wait
+awk '/\(incomplete\)/{print $1}' $RECORD | sort -V
+rm -f $RECORD

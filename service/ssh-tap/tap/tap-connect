@@ -1,0 +1,51 @@
+#!/bin/bash
+#author: jianingy.yang@gmail.com
+root=$(dirname $(readlink -f $0))
+ifenslave=/sbin/ifenslave
+ssh_opts=(
+	Tunnel=ethernet
+	LocalCommand="$root/tap-up"
+	StrictHostKeyChecking=no
+	PermitLocalCommand=yes
+	BatchMode=yes
+	ServerAliveInterval=5
+	ServerAliveCountMax=3
+	TCPKeepAlive=yes
+)
+
+error_log()
+{
+	echo >&2 "$@"
+}
+
+for opt in $*; do
+	case "$opt" in
+		--local-master) optval=opt_local_master ;;
+		--remote-master) optval=opt_remote_master ;;
+		--local-tap) optval=opt_local_tap ;;
+		--remote-tap) optval=opt_remote_tap ;;
+		--server) optval=opt_server ;;
+		*) [ -n "$optval" ] && eval "$optval=\"$opt\"" && unset optval ;;
+	esac
+done
+
+if ! which &>/dev/null $ifenslave; then
+	error_log "$ifenslave not found"
+	exit 255
+fi
+
+if ! ifconfig &>/dev/null $opt_local_master; then
+	error_log "$opt_local_master not found"
+	exit 255
+fi
+
+if [ -z "$opt_server" ]; then
+	error_log "no server specfieid"
+	exit 255
+fi
+
+for opt in ${ssh_opts[@]}; do
+	ssh_opt_str="$ssh_opt_str -o $opt"
+done
+export ifenslave opt_local_master opt_local_tap opt_remote_tap
+exec ssh -vvv -i $root/ssh/id_rsa -w $opt_local_tap:$opt_remote_tap $ssh_opt_str -p ${opt_server##*:} -l root ${opt_server%%:*} "tap --master $opt_remote_master --slave tap$opt_remote_tap"

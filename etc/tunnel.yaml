@@ -1,0 +1,19 @@
+---
+hostname: remotehost.example.org
+port: 22
+bind: 0.0.0.0
+strictchecking: no
+gateway: yes
+mode: remote
+remoteport: 22
+localip: 127.0.0.1
+localport: 2222
+identity: |
+  -----BEGIN RSA PRIVATE KEY-----
+  LINE1
+  LINE2
+  LINE3
+  LINE4
+  -----END RSA PRIVATE KEY-----"
+
+

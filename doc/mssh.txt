@@ -1,0 +1,82 @@
+mssh: A tool enables simultaneously remote command execution efficiently
+========================================================================
+
+What can mssh do?
+------------------
+
+* Run remote command over SSH simultaneously
+* Show a simple report on command exeuction status
+
+Features
+--------
+
+* Base on Twisted Framework, mssh is very efficient on I/O processing.
+* Unlike other simliar tools which implements parallelization by multiprocces or 
+multithread, mssh will not consume too many system resources. 
+* Output of mssh can be easily parsed by other program.
+
+Prerequisite
+------------
+
+* Python 2.6+
+* argparse - <http://code.google.com/p/argparse/>
+* Twisted - <http://twistedmatrix.com/trac/>
+
+Examples
+--------
+
+    nby ~/devel/mssh $ ./mssh -h xan,alex,lancelot,ns,abcdefg uptime
+    xan/0: 10:07:26 up 40 days, 16:01,  0 users,  load average: 0.02, 0.02, 0.00
+    lancelot/0: 09:59:14 up 47 days, 23 min,  0 users,  load average: 0.00, 0.00, 0.00
+    alex/0: 09:59:18 up 47 days, 23 min,  0 users,  load average: 0.00, 0.00, 0.00
+	ns/0: 10:03:56 up 53 days, 22:55, 25 users,  load average: 0.00, 0.08, 0.08
+	abcdefg/255:(timed out)
+	Failed(1): abcdefg
+	Succeeded(4): xan,lancelot,alex,ns
+
+In the above example, mssh runs 'uptime' on several machines. From the output, we can see that
+
+* 'Succeeded(4): ....': Four nodes successfully ran the command.
+* 'Failed(1): ....': One node failed to execute the command.
+* 'lancelot/0: ...': node 'lancelot' executed the command successfully with exit status 0.
+* 'abcdefg/255: ...': node 'abcdefg' failed  to execute the command with exit status 255.
+
+Furthermore, there are many interesting options with 'mssh', like
+
+* -m, number of max simultaneous running thread 
+* -I STRING, replace STRING in command with target's hostname, like
+  nby ~/devel/mssh $ ./mssh --timeout 5 -h xan,alex,lancelot,ns,abcdefg -I {} "echo {}"
+* --nocolor, turn off ANSI color rendering. It is useful when passing output to another program via pipe.
+* and more left for you to try out :P
+
+Authentications
+---------------
+
+Normally, mssh will try to use ssh-agent(1) for authentication. It will report a failure if this
+method failed to login, which means there is no fallback approaches for failure of public key 
+authentication. However, it is possible to explicitly specify a '--password' option in
+order to force mssh to use password authentication method.
+
+Experimental Functions
+----------------------
+
+The 'sudo' function currently is under experiment. I am glad if someone can help me find a better solution
+on executing remote command with sudo privileges, of course, in a secure way.
+
+If you want to have a try, please be careful. Here is an example:
+
+	nby ~/devel/mssh $ ./mssh --sudo -h xan,alex,lancelot,ns md5sum /etc/shadow
+	[sudo] password for root: 
+	lancelot(0):7bd957b48be056777e4d0b412addb5b5  /etc/shadow
+	xan(1):
+	alex(0):81899fd8971a19a31f367abee43faa76  /etc/shadow
+	ns(0):478d0d67b9ce9f92a390cc4222462737  /etc/shadow
+	Failed(1): xan
+	Succeeded(3): ns,alex,lancelot
+
+
+Feedback
+--------
+
+Send me email if you're having problems, find bugs, or have any random comments: jianingy.yang AT gmail DOT com
+

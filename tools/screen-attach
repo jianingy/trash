@@ -1,0 +1,76 @@
+#!/bin/bash
+
+# screen session re-attach
+# author: Jianing Yang <jianingy.yang@gmail.com>
+#
+# Usage: screen-attach [-auto]
+# Options:
+#         -auto           auto attach the first session.
+#
+
+until [ -z "$1" ]; do
+    case "$1" in
+        -auto)
+            auto_attach=1
+        ;;
+    esac
+    shift
+done
+
+[ "$TERM" == "screen" ] && exit 1
+screen=$(which screen 2>/dev/null)
+[ -z "$screen" ] && exit 2
+
+exec 3< <($screen -ls | awk '/^[ \t]+/{print $1,$NF}')
+
+# set IFS to tab
+OIFS=IFS
+IFS='	'
+while read session stat <&3
+do
+    sessions=("${sessions[@]}" "$session")
+    stats=("${stats[@]}" "$stat")
+done
+
+exec 3<&-
+
+[ ${#sessions[@]} -eq 0 ] && exit
+
+if [ ${#sessions[@]} -gt 1 -o -z "$auto_attach" ]; then
+    echo ============================================================================
+    echo -e "\e[1m\e[32mthere are screen sessions on this box: \e[0m"
+    echo 
+    id=0
+    for session in ${sessions[@]}
+    do
+        echo "    $id. $session ${stats[$id]}"
+        ((id++))
+    done
+    echo
+    echo ============================================================================
+    echo -ne "\e[1m\e[32mchoose a session to reattach (default=0): \e[0m"
+    read choice
+    if [ -z "$choice" ]; then 
+        sid=${sessions[0]%%.*}
+    else
+        sid=${sessions[$choice]%%.*}
+    fi
+else
+    stat=${stats[0]}
+    if [[ $stat =~ "Detach" ]]
+    then
+        sid="${sessions[0]%%.*}"
+    else
+        echo -e "\e[1m\e[31msession '${sessions[0]}' is already attached by another process.\e[0m"
+        unset sid
+    fi
+fi
+
+if [ -n "$sid" ]; then
+    # remove spaces
+    screen -aArd $sid
+else    
+    echo -e "\e[1m\e[31mno session reattach\e[0m"
+fi
+IFS=OIFS
+# vim: ts=4 sw=4 et ai

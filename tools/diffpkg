@@ -1,0 +1,55 @@
+#!/bin/bash
+
+# show package difference between two machines 
+
+# default settings
+listcmd='rpm -qa'
+addcmd='yum install'
+delcmd='rpm -e'
+diff=diff
+
+until [ -z "$1" ]; do
+    case "$1" in
+        -show-add|-showadd|--show-add|--showadd) show_add=1 ;;
+        -show-del|-showdel|--show-del|--showdel) show_del=1 ;;
+        -addcmd|--addcmd) shift && addcmd=$1 ;;
+        -delcmd|--delcmd) shift && delcmd=$1 ;;
+        -diff|--diff) shift && diff=$1 ;;
+        -listcmd|--listcmd) shift && listcmd=$1 ;;
+        -help|--help) help=1 ;;
+        *)
+            [ -z "$source" ] && source=$1 && shift ;
+            [ -z "$target" ] && target=$1 && shift
+        ;;
+    esac
+    shift
+done
+
+if [ -n "$help" -o -z "$source" -o -z "$target" ]; then
+    cat <<EOH
+Usage: $0 [OPTIONS] source target   
+Show differences of packages between two machines 
+OPTIONS:
+    -show-add           show commands to fix differences by adding pacakges on target
+    -show-del           show commands to fix differences by removing pacakges on target
+    -diff               use alternative diff command (default=diff)
+    -addcmd             command to add packages (default=yum install)
+    -delcmd             command to remove packages (default=rpm -e)
+    -listcmd            command to list packages (default=rpm -ql)
+    -help               this message
+
+Report bugs to Jianing Yang <jianingy.yang@gmail.com>
+EOH
+elif [ -n "$show_add" -o -n "$show_del" ]; then
+    while read direction item 
+    do
+        [ "$direction" == "<" ] && adds="$adds $item"
+        [ "$direction" == ">" ] && dels="$dels $item"
+    done < <(diff <(ssh $source -- $listcmd | sort -u) <(ssh $target -- $listcmd | sort -u))
+    [ -n "$show_add" ] && echo $addcmd $adds && exit
+    [ -n "$show_del" ] && echo $delcmd $dels && exit
+else
+    $diff <(ssh $source -- $listcmd | sort -u) <(ssh $target -- $listcmd | sort -u)
+fi
+
+# vim: ts=4 sw=4 et ai

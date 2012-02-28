@@ -1,0 +1,201 @@
+#!/usr/bin/env ruby
+# -*- mode: ruby -*-
+# License: Public Domain
+# Author: jianingy.yang AT gmail DOT com
+require 'etc'
+require 'yaml'
+require 'pp'
+
+#############################################################################
+#
+# Basic Settings
+#
+#############################################################################
+
+$prog = 'tbsvc'
+$service_prefix = 'tun'
+$site_root = File.expand_path(File.join(File.dirname(__FILE__), '..'))
+$sys_service_root = "/service"
+
+$default_option = {
+  :strictchecking => 'yes',
+  :checkinterval  => '5',
+  :checkcount     => '3',
+  :user           => Etc.getpwuid(Process.uid).name,
+  :gateway        => 'yes',
+  :mode           => 'remote',
+  :port           => '22',
+  :localip        => '127.0.0.1',
+  :remoteip       => '127.0.0.1',
+}
+
+#############################################################################
+#
+# Helper functions
+#
+#############################################################################
+
+def abort(reason)
+  puts "ERROR: #{reason}"
+  exit 1
+end
+
+def assert_bin(*arg)
+  arg.each do |bin|
+    binpath = ENV['PATH'].split(':').select { |p| File.executable?(File.join(p, bin.to_s)) }
+    abort "`#{bin}' cannot be found in PATH" unless binpath.length > 0
+  end
+end
+
+def assert_directory(*arg)
+  arg.each do |d|
+    d = File.join($site_root, d.to_s)
+    Dir.mkdir(d) unless File.directory?(d)
+    abort "`#{d}' cannot be created" unless File.directory?(d)
+  end
+end
+
+def ssh_version
+  return case %x{ssh 2>&1 -V}
+    when /5[.]\dp\d/
+    5
+    else
+    4
+  end
+end
+
+def load_option(name)
+  yml = File.join($site_root, 'etc', "#{name}.yaml")
+  YAML::load_file(yml).inject($default_option) { |memo, (k, v)|
+    memo[k.to_sym] = v; memo
+  }
+end
+
+#############################################################################
+#
+# Major functions
+#
+#############################################################################
+
+def create_service!(name)
+  assert_service name
+  opts = load_option(name)
+  cmd_options = [
+                 "-p #{opts[:port]}",
+                 "-l #{opts[:user]}",
+                 '-N',
+                ]
+
+  cmd_options.push(case opts[:mode]
+                     when /^remote$/
+                     "-R #{opts[:bind]}:#{opts[:remoteport]}:#{opts[:localip]}:#{opts[:localport]}"
+                     when /^local$/
+                     "-L #{opts[:bind]}:#{opts[:localport]}:#{opts[:remoteip]}:#{opts[:remoteport]}"
+                     when /^socks$/
+                     "-D #{opts[:bind]}:#{opts[:localport]}"
+                     end)
+  cmd_options.push('-i id_rsa') if opts.include? :identity
+  ssh_options = %W{BatchMode=yes
+                   TCPKeepALive=yes
+                   GatewayPorts=#{opts[:gateway]}
+                   StrictHostkeyChecking=#{opts[:strictchecking]}
+                   ServerAliveInterval=#{opts[:checkinterval]}
+                   ServerAliveCountMax=#{opts[:checkcount]}}
+  ssh_options.push("ExitOnForwardFailure=yes") if ssh_version > 4
+  scripts = YAML::load(DATA.read)
+  service_root = File.join($site_root, 'service', name)
+  service_log_root = File.join($site_root, 'service', name, 'log')
+  Dir.mkdir(service_root) unless File.directory?(service_root)
+  Dir.mkdir(service_log_root) unless File.directory?(service_log_root)
+  open(File.join(service_root, 'id_rsa'), "w+") { |f|
+    f.write(opts[:identity])
+    f.chmod(0600)
+  } if opts.include? :identity
+  open(File.join(service_root, 'run'), "w+") { |f|
+    f.write(scripts[:runscript] % [
+              (ssh_options.map {|o| "-o #{o}"}).join(' '),
+              cmd_options.join(' '),
+              opts[:hostname],
+            ].join(' '))
+    f.chmod(0755)
+  }
+  open(File.join(service_log_root, 'run'), "w+") { |f|
+    f.write(scripts[:logscript])
+    f.chmod(0755)
+  }
+end
+
+def install_service!(name)
+  assert_service name
+  service_root = File.join($site_root, 'service', name)
+  create_service!(name) unless File.directory?(service_root)
+  File.symlink(service_root,
+               File.join($sys_service_root, "#{$service_prefix}-#{name}"))
+end
+
+def uninstall_service!(name)
+  assert_service name
+  service_root = File.join($site_root, 'service', name)
+  File.unlink(File.join($sys_service_root, "#{$service_prefix}-#{name}"))
+  system("svc -dx #{service_root} #{service_root}/log")
+end
+
+def assert_service(name)
+  abort('service name cannot be empty') unless name.length > 0
+end
+
+def control_service(switch, name)
+  assert_service name
+  system("svc #{switch} #{$sys_service_root}/#{$service_prefix}-#{name}")
+end
+
+def stat_service!(name)
+  if name
+    system("svstat #{$sys_service_root}/#{$service_prefix}-#{name}")
+  else
+    Dir.glob("#{$sys_service_root}/#{$service_prefix}-*").each do |service|
+      system("svstat #{service}")
+    end
+  end
+end
+
+def start_service!(name); control_service "-u", name; end
+def stop_service!(name); control_service "-d", name; end
+def restart_service!(name); control_service "-t", name; end
+
+def print_help_and_exit
+  print <<EOF_HELP
+Usage: #{$prog} {install|uninstall|start|stop|restart|stat} service
+An OpenSSH Port Forwarding Broker based on daemontools
+
+EOF_HELP
+  exit 0
+end
+
+#############################################################################
+#
+# Main routine
+#
+#############################################################################
+
+assert_bin :svc, :svstat, :ssh
+assert_directory :service, :etc
+print_help_and_exit unless ARGV.length > 0
+routine = "#{ARGV[0]}_service!"
+print_help_and_exit unless defined? routine
+send(routine, ARGV[1])
+
+__END__
+---
+:runscript: |
+  #!/bin/sh
+  exec 2>&1
+  exec ssh -vvv %s
+
+:logscript: |
+  #!/bin/sh
+  LOGDIR=./main
+  [ ! -d $LOGDIR ] && mkdir -p $LOGDIR
+  chown nobody. $LOGDIR
+  exec setuidgid nobody multilog t I s200000 n5 $LOGDIR
+
